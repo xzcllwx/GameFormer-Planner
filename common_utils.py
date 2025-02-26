@@ -211,7 +211,7 @@ def get_scenario_map():
     return scenario_map
 
 
-def get_filter_parameters(num_scenarios_per_type=20, limit_total_scenarios=None, shuffle=True):
+def get_filter_parameters(num_scenarios_per_type=None, limit_total_scenarios=None, shuffle=True):
     # nuplan challenge
     scenario_types = [
         'starting_left_turn',
@@ -246,7 +246,7 @@ def get_filter_parameters(num_scenarios_per_type=20, limit_total_scenarios=None,
     ego_start_speed_threshold = None     # Limit to scenarios where the ego reaches a certain speed from below
     ego_stop_speed_threshold = None      # Limit to scenarios where the ego reaches a certain speed from above
     speed_noise_tolerance = None         # Value at or below which a speed change between two timepoints should be ignored as noise.
-
+    print(f"Scenario types: {num_scenarios_per_type}")
     return scenario_types, scenario_tokens, log_names, map_names, num_scenarios_per_type, limit_total_scenarios, timestamp_threshold_s, ego_displacement_minimum_m, \
            expand_scenarios, remove_invalid_goals, shuffle, ego_start_speed_threshold, ego_stop_speed_threshold, speed_noise_tolerance
 

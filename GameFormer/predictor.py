@@ -1,6 +1,10 @@
 import torch
 from .predictor_modules import *
+# import math
+ 
+# import torch
 
+# torch.pi = math.pi
 
 class Encoder(nn.Module):
     def __init__(self, dim=256, layers=6, heads=8, dropout=0.1):
@@ -16,6 +20,9 @@ class Encoder(nn.Module):
         attention_layer = nn.TransformerEncoderLayer(d_model=dim, nhead=heads, dim_feedforward=dim*4,
                                                      activation=F.gelu, dropout=dropout, batch_first=True)
         self.fusion_encoder = nn.TransformerEncoder(attention_layer, layers, enable_nested_tensor=False)
+        # attention_layer = nn.TransformerEncoderLayer(d_model=dim, nhead=heads, dim_feedforward=dim*4,
+        #                                              activation="gelu", dropout=dropout, batch_first=True)
+        # self.fusion_encoder = nn.TransformerEncoder(attention_layer, layers)
 
     def forward(self, inputs):
         # agents

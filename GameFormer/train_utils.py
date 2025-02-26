@@ -67,6 +67,7 @@ def imitation_loss(gmm, scores, ground_truth):
     gmm_loss = torch.mean(gmm_loss)
 
     score_loss = F.cross_entropy(scores.permute(0, 2, 1), best_mode, label_smoothing=0.2, reduction='none')
+    # score_loss = F.cross_entropy(scores.permute(0, 2, 1), best_mode, reduction='none')
     score_loss = score_loss * torch.ne(ground_truth[:, :, 0, 0], 0)
     score_loss = torch.mean(score_loss)
     

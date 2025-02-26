@@ -8,7 +8,8 @@ from nuplan.planning.utils.multithreading.worker_parallel import SingleMachinePa
 from nuplan.planning.scenario_builder.scenario_filter import ScenarioFilter
 from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_builder import NuPlanScenarioBuilder
 from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_utils import ScenarioMapping
-
+import concurrent.futures
+import threading
 
 # define data processor
 class DataProcessor(object):
@@ -129,7 +130,7 @@ class DataProcessor(object):
         np.savez(f"{dir}/{data['map_name']}_{data['token']}.npz", **data)
 
     def work(self, save_dir, debug=False):
-        for scenario in tqdm(self._scenarios):
+        for scenario in tqdm(self._scenarios, desc=f"Training: {threading.current_thread().name}"):
             map_name = scenario._map_name
             token = scenario.token
             self.scenario = scenario
@@ -161,12 +162,17 @@ class DataProcessor(object):
             self.save_to_disk(save_dir, data)
             
 
+def process_chunk(scenario_chunk, save_dir, debug):
+    # print(f"Processing chunk in thread: {threading.current_thread().name}")
+    processor = DataProcessor(scenario_chunk)
+    processor.work(save_dir, debug)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Data Processing')
     parser.add_argument('--data_path', type=str, help='path to raw data')
     parser.add_argument('--map_path', type=str, help='path to map data')
     parser.add_argument('--save_path', type=str, help='path to save processed data')
-    parser.add_argument('--scenarios_per_type', type=int, default=None, help='number of scenarios per type')
+    parser.add_argument('--scenarios_per_type', type=int, default=1000, help='number of scenarios per type')
     parser.add_argument('--total_scenarios', type=int, default=None, help='limit total number of scenarios')
     parser.add_argument('--shuffle_scenarios', type=bool, default=False, help='shuffle scenarios')
     parser.add_argument('--debug', action="store_true", help='if visualize the data output', default=False)
@@ -181,12 +187,26 @@ if __name__ == "__main__":
     db_files = None
     scenario_mapping = ScenarioMapping(scenario_map=get_scenario_map(), subsample_ratio_override=0.5)
     builder = NuPlanScenarioBuilder(args.data_path, args.map_path, sensor_root, db_files, map_version, scenario_mapping=scenario_mapping)
-    scenario_filter = ScenarioFilter(*get_filter_parameters(args.scenarios_per_type, args.total_scenarios, args.shuffle_scenarios))
+    scenario_filter = ScenarioFilter(*get_filter_parameters(None, args.total_scenarios, args.shuffle_scenarios))
     worker = SingleMachineParallelExecutor(use_process_pool=True)
     scenarios = builder.get_scenarios(scenario_filter, worker)
     print(f"Total number of scenarios: {len(scenarios)}")
-    
+
     # process data
     del worker, builder, scenario_filter, scenario_mapping
-    processor = DataProcessor(scenarios)
-    processor.work(args.save_path, debug=args.debug)
+
+    # processor = DataProcessor(scenarios)
+    # processor.work(args.save_path, debug=args.debug)
+
+    # Split scenarios into chunks
+    num_processors = 24  # Number of processors to use
+    chunk_size = len(scenarios) // num_processors
+    scenario_chunks = [scenarios[i:i + chunk_size] for i in range(0, len(scenarios), chunk_size)]
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_processors) as executor:
+        futures = [executor.submit(process_chunk, chunk, args.save_path, args.debug) for chunk in scenario_chunks]
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
+        executor.shutdown(wait=True)  # Ensure all threads are properly closed
+    
+    print("Data processing completed!")

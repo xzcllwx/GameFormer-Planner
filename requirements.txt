@@ -1,1 +1,5 @@
+apt-get install libsuitesparse-dev
+conda config --add channels conda-forge
+conda install sqlite=3.48.0
 theseus-ai==0.1.3
+functorch == 0.2.0

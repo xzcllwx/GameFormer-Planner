@@ -94,6 +94,9 @@ def build_simulation(experiment, planner, scenarios, output_dir, simulation_dir,
                                                                  "TRAFFIC_CONE", "GENERIC_OBJECT"])
 
         # Simulation Manager
+        # print(scenario.duration_s.time_s)
+        # if scenario.duration_s.time_s < 1:
+        #     continue
         simulation_time_controller = StepSimulationTimeController(scenario)
 
         # Stateful callbacks

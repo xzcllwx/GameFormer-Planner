@@ -1,0 +1,4 @@
+*.pyc
+*.pth
+testing_log/
+training_log/
