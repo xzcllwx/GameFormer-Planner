@@ -20,7 +20,6 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe
         
         return self.dropout(x)
-    
 
 class AgentEncoder(nn.Module):
     def __init__(self, agent_dim):
@@ -42,8 +41,8 @@ class VectorMapEncoder(nn.Module):
 
     def segment_map(self, map, map_encoding):
         B, N_e, N_p, D = map_encoding.shape 
-        map_encoding = F.max_pool2d(map_encoding.permute(0, 3, 1, 2), kernel_size=(1, 10))
-        map_encoding = map_encoding.permute(0, 2, 3, 1).reshape(B, -1, D)
+        map_encoding = F.max_pool2d(map_encoding.permute(0, 3, 1, 2), kernel_size=(1, 10)) # 减少点的数量
+        map_encoding = map_encoding.permute(0, 2, 3, 1).reshape(B, -1, D) # 融合Ne和Np两个维度
 
         map_mask = torch.eq(map, 0)[:, :, :, 0].reshape(B, N_e, N_p//10, N_p//(N_p//10))
         map_mask = torch.max(map_mask, dim=-1)[0].reshape(B, -1)
@@ -143,11 +142,11 @@ class InitialPredictionDecoder(nn.Module):
 
     def forward(self, current_states, encoding, mask):
         N = self._agents
-        multi_modal_query = self.multi_modal_query_embedding(self.modal)
-        agent_query = self.agent_query_embedding(self.agent)
-        query = encoding[:, :N, None] + multi_modal_query[None, :, :] + agent_query[:, None, :]
-        query_content = torch.stack([self.query_encoder(query[:, i], encoding, encoding, mask) for i in range(N)], dim=1)
-        predictions, scores = self.predictor(query_content)
+        multi_modal_query = self.multi_modal_query_embedding(self.modal) # [6,256]
+        agent_query = self.agent_query_embedding(self.agent) # [11,256]
+        query = encoding[:, :N, None] + multi_modal_query[None, :, :] + agent_query[:, None, :] # [64,11,6,256]
+        query_content = torch.stack([self.query_encoder(query[:, i], encoding, encoding, mask) for i in range(N)], dim=1) # [64,11,6,256]
+        predictions, scores = self.predictor(query_content) # [64,11,6,80,4] [64,11,6]
         predictions[..., :2] += current_states[:, :N, None, None, :2]
 
         return query_content, predictions, scores
@@ -166,20 +165,22 @@ class InteractionDecoder(nn.Module):
         N = actors.shape[1]
         
         # using future encoder to encode the future trajectories
-        multi_futures = self.future_encoder(actors[..., :2], current_states[:, :N])
-        
+        multi_futures = self.future_encoder(actors[..., :2], current_states[:, :N]) # [64,11,6,256]
+        # 加入位置编码，cat past轨迹
+        # 与意图mlp后，根据终点选择目标车道，与目标车道编码cat，再mlp 或者 不mlp直接attention？
+
         # using scores to weight the encoded futures
-        futures = (multi_futures * scores.softmax(-1).unsqueeze(-1)).mean(dim=2)    
+        futures = (multi_futures * scores.softmax(-1).unsqueeze(-1)).mean(dim=2) # [64,11,256]   
         
         # using self-attention to encode the interaction
-        interaction = self.interaction_encoder(futures, mask[:, :N])
+        interaction = self.interaction_encoder(futures, mask[:, :N]) # [64,11,256]
         
         # append the interaction encoding to the common content
-        encoding = torch.cat([interaction, encoding], dim=1)
+        encoding = torch.cat([interaction, encoding], dim=1) # [64,247,256]
 
         # mask out the corresponding agents
-        mask = torch.cat([mask[:, :N], mask], dim=1)
-        mask = mask.unsqueeze(1).expand(-1, N, -1).clone()
+        mask = torch.cat([mask[:, :N], mask], dim=1) # [64,247]
+        mask = mask.unsqueeze(1).expand(-1, N, -1).clone() # [64,11,247]
         for i in range(N):
             mask[:, i, i] = 1
 

@@ -26,22 +26,26 @@ class Encoder(nn.Module):
 
     def forward(self, inputs):
         # agents
-        ego = inputs['ego_agent_past']
-        neighbors = inputs['neighbor_agents_past']
+        # ego pose (x, y, heading) velocities (vx, vy) acceleration (ax, ay) at time t ego此刻状态为中心  [B,T, 7] T =21
+        ego = inputs['ego_agent_past'] 
+        # agent pose (x, y, heading) velocities (vx, vy, yaw rate) and size (length, width)、 agent type at time t ego周围的邻居 [B,N,T, 11]
+        #Agent type is one-hot encoded: [1, 0, 0] vehicle, [0, 1, 0] pedestrain, [0, 0, 1] bicycle 
+        neighbors = inputs['neighbor_agents_past'] 
+        # agents [B, N+1, T, 5]
         actors = torch.cat([ego[:, None, :, :5], neighbors[..., :5]], dim=1)
 
         # agent encoding
         encoded_ego = self.ego_encoder(ego)
         encoded_neighbors = [self.agent_encoder(neighbors[:, i]) for i in range(neighbors.shape[1])]
-        encoded_actors = torch.stack([encoded_ego] + encoded_neighbors, dim=1)
-        actors_mask = torch.eq(actors[:, :, -1].sum(-1), 0)
+        encoded_actors = torch.stack([encoded_ego] + encoded_neighbors, dim=1) # [[256],256,...,256] [B,N+1,256]
+        actors_mask = torch.eq(actors[:, :, -1].sum(-1), 0) # 标记最后一个时间步无效的agent[B,N]
 
         # vector maps
-        map_lanes = inputs['map_lanes']
-        map_crosswalks = inputs['map_crosswalks']
+        map_lanes = inputs['map_lanes'] # [64,40,50,7]
+        map_crosswalks = inputs['map_crosswalks'] # [64,5,30,3]
 
         # map encoding
-        encoded_map_lanes, lanes_mask = self.lane_encoder(map_lanes)
+        encoded_map_lanes, lanes_mask = self.lane_encoder(map_lanes) # mask: [B, Ne*Np]
         encoded_map_crosswalks, crosswalks_mask = self.crosswalk_encoder(map_crosswalks)
 
         # attention fusion encoding
@@ -75,8 +79,8 @@ class Decoder(nn.Module):
 
     def forward(self, encoder_outputs):
         decoder_outputs = {}
-        current_states = encoder_outputs['actors'][:, :, -1]
-        encoding, mask = encoder_outputs['encoding'], encoder_outputs['mask']
+        current_states = encoder_outputs['actors'][:, :, -1] # encoder_outputs['actors'] [64,21,21,5]
+        encoding, mask = encoder_outputs['encoding'], encoder_outputs['mask'] # [BATCH, Am+Aa, F] [64, 236, 256] [64, 236]
 
         # level 0 decode
         last_content, last_level, last_score = self.initial_predictor(current_states, encoding, mask)
@@ -90,7 +94,7 @@ class Decoder(nn.Module):
             decoder_outputs[f'level_{k}_interactions'] = last_level
             decoder_outputs[f'level_{k}_scores'] = last_score
         
-        env_encoding = last_content[:, 0]
+        env_encoding = last_content[:, 0] # [64,11,6,256] -> [64,6,256]
 
         return decoder_outputs, env_encoding
 
@@ -107,7 +111,7 @@ class NeuralPlanner(nn.Module):
         dt = 0.1 # discrete time period [s]
         max_a = 5 # vehicle's accleration limits [m/s^2]
         max_d = 0.5 # vehicle's steering limits [rad]
-        
+        # 动力学限制
         vel_init = torch.hypot(initial_state[..., 3], initial_state[..., 4])
         vel = vel_init[:, None] + torch.cumsum(controls[..., 0].clamp(-max_a, max_a) * dt, dim=-1)
         vel = torch.clamp(vel, min=0)
@@ -125,9 +129,9 @@ class NeuralPlanner(nn.Module):
         return torch.stack((x, y, yaw), dim=-1)
 
     def forward(self, env_encoding, route_lanes, initial_state):
-        route_lanes, mask = self.route_encoder(route_lanes)
-        mask[:, 0] = False
-        route_encoding = self.route_fusion(env_encoding, route_lanes, route_lanes, mask)
+        route_lanes, mask = self.route_encoder(route_lanes) # [64,6,256]
+        mask[:, 0] = False # 第一个不能mask掉
+        route_encoding = self.route_fusion(env_encoding, route_lanes, route_lanes, mask) # [64,6,256] X [64,50,256]
         env_route_encoding = torch.cat([env_encoding, route_encoding], dim=-1)
         env_route_encoding = torch.max(env_route_encoding, dim=1)[0] # max pooling over modalities
         control = self.plan_decoder(env_route_encoding)

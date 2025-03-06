@@ -10,6 +10,7 @@ from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_builder import N
 from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_utils import ScenarioMapping
 import concurrent.futures
 import threading
+from multiprocessing import Pool
 
 # define data processor
 class DataProcessor(object):
@@ -162,10 +163,9 @@ class DataProcessor(object):
             self.save_to_disk(save_dir, data)
             
 
-def process_chunk(scenario_chunk, save_dir, debug):
-    # print(f"Processing chunk in thread: {threading.current_thread().name}")
-    processor = DataProcessor(scenario_chunk)
-    processor.work(save_dir, debug)
+def process_chunk(scenarios):
+    processor = DataProcessor(scenarios)
+    processor.work(save_dir = save_path, debug = debug_config)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Data Processing')
@@ -180,7 +180,16 @@ if __name__ == "__main__":
 
     # create save folder
     os.makedirs(args.save_path, exist_ok=True)
- 
+
+    # # Load filtered scenario tokens from file
+    # with open('/root/xzcllwx_ws/tokens.txt', 'r') as file:
+    #     tokens = file.read().splitlines()
+
+    # # Filter scenarios based on tokens
+    # filtered_scenarios_dict = [token for token in tokens]
+    # print(f"Total number of filtered scenarios: {len(filtered_scenarios_dict)}")
+    # # print(scenarios_dict)
+
     # get scenarios
     map_version = "nuplan-maps-v1.0"    
     sensor_root = None
@@ -197,16 +206,24 @@ if __name__ == "__main__":
 
     # processor = DataProcessor(scenarios)
     # processor.work(args.save_path, debug=args.debug)
-
+    
     # Split scenarios into chunks
     num_processors = 24  # Number of processors to use
+    save_path = args.save_path
+    debug_config = args.debug
+
     chunk_size = len(scenarios) // num_processors
     scenario_chunks = [scenarios[i:i + chunk_size] for i in range(0, len(scenarios), chunk_size)]
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=num_processors) as executor:
-        futures = [executor.submit(process_chunk, chunk, args.save_path, args.debug) for chunk in scenario_chunks]
-        for future in concurrent.futures.as_completed(futures):
-            future.result()
-        executor.shutdown(wait=True)  # Ensure all threads are properly closed
-    
+    # with concurrent.futures.ProcessPoolExecutor(max_workers=num_processors) as executor:
+    #     futures = [executor.submit(process_chunk, chunk, args.save_path, args.debug) for chunk in scenario_chunks]
+    #     for future in concurrent.futures.as_completed(futures):
+    #         future.result()
+    #     executor.shutdown(wait=True)  # Ensure all threads are properly closed
+    # 查看scenarios的数据类型
+    # print(type(scenario_chunks))
+    with Pool(processes=num_processors) as p:
+        p.map(process_chunk, scenario_chunks)
+    p.close()
+    p.join()
     print("Data processing completed!")

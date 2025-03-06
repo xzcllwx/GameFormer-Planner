@@ -175,13 +175,22 @@ if __name__ == "__main__":
     # create save folder
     os.makedirs(args.save_path, exist_ok=True)
  
+    # Load filtered scenario tokens from file
+    with open('/root/xzcllwx_ws/tokens.txt', 'r') as file:
+        tokens = file.read().splitlines()
+
+    # Filter scenarios based on tokens
+    scenarios_dict = [token for token in tokens]
+    print(scenarios_dict)
+
+
     # get scenarios
     map_version = "nuplan-maps-v1.0"    
     sensor_root = None
     db_files = None
     scenario_mapping = ScenarioMapping(scenario_map=get_scenario_map(), subsample_ratio_override=0.5)
     builder = NuPlanScenarioBuilder(args.data_path, args.map_path, sensor_root, db_files, map_version, scenario_mapping=scenario_mapping)
-    scenario_filter = ScenarioFilter(*get_filter_parameters(args.scenarios_per_type, args.total_scenarios, args.shuffle_scenarios))
+    scenario_filter = ScenarioFilter(*get_filter_parameters(args.scenarios_per_type, args.total_scenarios, args.shuffle_scenarios, scenarios_dict))
     worker = SingleMachineParallelExecutor(use_process_pool=True)
     scenarios = builder.get_scenarios(scenario_filter, worker)
     print(f"Total number of scenarios: {len(scenarios)}")

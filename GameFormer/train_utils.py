@@ -46,11 +46,11 @@ class DrivingData(Dataset):
 
 def imitation_loss(gmm, scores, ground_truth):
     B, N = gmm.shape[0], gmm.shape[1]
-    distance = torch.norm(gmm[:, :, :, :, :2] - ground_truth[:, :, None, :, :2], dim=-1)
-    best_mode = torch.argmin(distance.mean(-1), dim=-1)
+    distance = torch.norm(gmm[:, :, :, :, :2] - ground_truth[:, :, None, :, :2], dim=-1) # [64,11,6,80]
+    best_mode = torch.argmin(distance.mean(-1), dim=-1) # [64,11]
 
-    mu = gmm[..., :2]
-    best_mode_mu = mu[torch.arange(B)[:, None, None], torch.arange(N)[None, :, None], best_mode[:, :, None]]
+    mu = gmm[..., :2] # [64,11,6,80,2] 
+    best_mode_mu = mu[torch.arange(B)[:, None, None], torch.arange(N)[None, :, None], best_mode[:, :, None]] # [64,11,1,80,2]
     best_mode_mu = best_mode_mu.squeeze(2)
     dx = ground_truth[..., 0] - best_mode_mu[..., 0]
     dy = ground_truth[..., 1] - best_mode_mu[..., 1]
@@ -66,9 +66,9 @@ def imitation_loss(gmm, scores, ground_truth):
     gmm_loss = log_std_x + log_std_y + 0.5 * (torch.square(dx/std_x) + torch.square(dy/std_y))
     gmm_loss = torch.mean(gmm_loss)
 
-    score_loss = F.cross_entropy(scores.permute(0, 2, 1), best_mode, label_smoothing=0.2, reduction='none')
+    score_loss = F.cross_entropy(scores.permute(0, 2, 1), best_mode, label_smoothing=0.2, reduction='none') # [64,11]
     # score_loss = F.cross_entropy(scores.permute(0, 2, 1), best_mode, reduction='none')
-    score_loss = score_loss * torch.ne(ground_truth[:, :, 0, 0], 0)
+    score_loss = score_loss * torch.ne(ground_truth[:, :, 0, 0], 0) # [64,11]
     score_loss = torch.mean(score_loss)
     
     loss = gmm_loss + score_loss
@@ -79,11 +79,11 @@ def imitation_loss(gmm, scores, ground_truth):
 def level_k_loss(outputs, ego_future, neighbors_future, neighbors_future_valid):
     loss: torch.tensor = 0
     levels = len(outputs.keys()) // 2 
-    gt_future = torch.cat([ego_future[:, None], neighbors_future], dim=1)
+    gt_future = torch.cat([ego_future[:, None], neighbors_future], dim=1) # [64,11,80,3]
 
     for k in range(levels):
-        trajectories = outputs[f'level_{k}_interactions']
-        scores = outputs[f'level_{k}_scores']
+        trajectories = outputs[f'level_{k}_interactions'] # [64,11,6,80,4]
+        scores = outputs[f'level_{k}_scores'] # [64,11,6]
         predictions = trajectories[:, 1:] * neighbors_future_valid[:, :, None, :, 0, None]
         plan = trajectories[:, :1]
         trajectories = torch.cat([plan, predictions], dim=1)

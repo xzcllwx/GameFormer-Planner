@@ -211,7 +211,7 @@ def get_scenario_map():
     return scenario_map
 
 
-def get_filter_parameters(num_scenarios_per_type=None, limit_total_scenarios=None, shuffle=True):
+def get_filter_parameters(num_scenarios_per_type=None, limit_total_scenarios=None, shuffle=True, scenario_tokens=None):
     # nuplan challenge
     scenario_types = [
         'starting_left_turn',
@@ -230,7 +230,8 @@ def get_filter_parameters(num_scenarios_per_type=None, limit_total_scenarios=Non
         'following_lane_with_lead',
     ]
 
-    scenario_tokens = None              # List of scenario tokens to include
+    scenario_tokens              # List of scenario tokens to include
+    # print(f"Filtered Scenario tokens number: {len(scenario_tokens)}")
     log_names = None                     # Filter scenarios by log names
     map_names = None                     # Filter scenarios by map names
 

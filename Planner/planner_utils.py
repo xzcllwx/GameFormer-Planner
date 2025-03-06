@@ -31,7 +31,7 @@ class TrajectoryPlanner:
         if ref_path is not None:
             distance_to_ref = scipy.spatial.distance.cdist(plan[:, :2], ref_path[:, :2])
             i = np.argmin(distance_to_ref, axis=1)
-            plan = ref_path[i, :3]
+            plan = ref_path[i, :3] # 基于学习方案做速度规划
             s = np.concatenate([[0], i]) * 0.1
             speed = np.diff(s) / DT
         else:

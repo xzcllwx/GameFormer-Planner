@@ -19,15 +19,15 @@ def train_epoch(data_loader, model, optimizer):
         for batch in data_epoch:
             # prepare data
             inputs = {
-                'ego_agent_past': batch[0].to(args.device),
-                'neighbor_agents_past': batch[1].to(args.device),
-                'map_lanes': batch[2].to(args.device),
-                'map_crosswalks': batch[3].to(args.device),
-                'route_lanes': batch[4].to(args.device)
+                'ego_agent_past': batch[0].to(args.device, non_blocking=True),
+                'neighbor_agents_past': batch[1].to(args.device, non_blocking=True),
+                'map_lanes': batch[2].to(args.device, non_blocking=True),
+                'map_crosswalks': batch[3].to(args.device, non_blocking=True),
+                'route_lanes': batch[4].to(args.device, non_blocking=True)
             }
 
-            ego_future = batch[5].to(args.device)
-            neighbors_future = batch[6].to(args.device)
+            ego_future = batch[5].to(args.device, non_blocking=True) # [64,80,3]
+            neighbors_future = batch[6].to(args.device, non_blocking=True) # [64,10,80,3]
             neighbors_future_valid = torch.ne(neighbors_future[..., :2], 0)
 
             # call the mdoel
@@ -71,15 +71,15 @@ def valid_epoch(data_loader, model):
         for batch in data_epoch:
            # prepare data
             inputs = {
-                'ego_agent_past': batch[0].to(args.device),
-                'neighbor_agents_past': batch[1].to(args.device),
-                'map_lanes': batch[2].to(args.device),
-                'map_crosswalks': batch[3].to(args.device),
-                'route_lanes': batch[4].to(args.device)
+                'ego_agent_past': batch[0].to(args.device, non_blocking=True),
+                'neighbor_agents_past': batch[1].to(args.device, non_blocking=True),
+                'map_lanes': batch[2].to(args.device, non_blocking=True),
+                'map_crosswalks': batch[3].to(args.device, non_blocking=True),
+                'route_lanes': batch[4].to(args.device, non_blocking=True)
             }
 
-            ego_future = batch[5].to(args.device)
-            neighbors_future = batch[6].to(args.device)
+            ego_future = batch[5].to(args.device, non_blocking=True)
+            neighbors_future = batch[6].to(args.device, non_blocking=True)
             neighbors_future_valid = torch.ne(neighbors_future[..., :2], 0)
 
             # call the mdoel
@@ -129,7 +129,7 @@ def model_training():
 
     # set up optimizer
     optimizer = optim.AdamW(gameformer.parameters(), lr=args.learning_rate)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[10, 12, 14, 16, 18], gamma=0.5)
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[10, 15, 20, 22, 24, 26, 28], gamma=0.5)
 
     # training parameters
     train_epochs = args.train_epochs
@@ -138,8 +138,10 @@ def model_training():
     # set up data loaders
     train_set = DrivingData(args.train_set + '/*.npz', args.num_neighbors)
     valid_set = DrivingData(args.valid_set + '/*.npz', args.num_neighbors)
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=os.cpu_count())
-    valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False, num_workers=os.cpu_count())
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=args.workers,
+                              pin_memory=True, prefetch_factor=16, persistent_workers=True)
+    valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False, num_workers=args.workers,
+                              pin_memory=True)
     logging.info("Dataset Prepared: {} train data, {} validation data\n".format(len(train_set), len(valid_set)))
     
     # begin training
@@ -183,12 +185,13 @@ if __name__ == "__main__":
     parser.add_argument('--valid_set', type=str, help='path to validation data')
     parser.add_argument('--seed', type=int, help='fix random seed', default=3407)
     parser.add_argument('--encoder_layers', type=int, help='number of encoding layers', default=3)
-    parser.add_argument('--decoder_levels', type=int, help='levels of reasoning', default=2)
+    parser.add_argument('--decoder_levels', type=int, help='levels of reasoning', default=4)
     parser.add_argument('--num_neighbors', type=int, help='number of neighbor agents to predict', default=10)
     parser.add_argument('--train_epochs', type=int, help='epochs of training', default=20)
     parser.add_argument('--batch_size', type=int, help='batch size (default: 32)', default=32)
     parser.add_argument('--learning_rate', type=float, help='learning rate (default: 1e-4)', default=1e-4)
     parser.add_argument('--device', type=str, help='run on which device (default: cuda)', default='cuda')
+    parser.add_argument("--workers", type=int, default=8, help="number of workers used for dataloader")
     args = parser.parse_args()
 
     # Run
