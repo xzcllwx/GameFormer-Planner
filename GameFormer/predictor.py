@@ -75,26 +75,42 @@ class Decoder(nn.Module):
         self.initial_predictor = InitialPredictionDecoder(modalities, neighbors)
 
         # level-k reasoning
-        self.interaction_stage = nn.ModuleList([InteractionDecoder(modalities, future_encoder) for _ in range(levels)])
+        self.interaction_stage = nn.ModuleList([InteractionDecoder(modalities, future_encoder) for _ in range(self.levels)])
+
+        self.final_predictor = FinalDecoder(modalities)
 
     def forward(self, encoder_outputs):
         decoder_outputs = {}
-        current_states = encoder_outputs['actors'][:, :, -1] # encoder_outputs['actors'] [64,21,21,5]
+        current_states = encoder_outputs['actors'][:, :, -1] # [64,21,5]
+        past_states = encoder_outputs['actors'] # [64,21,21,5]
         encoding, mask = encoder_outputs['encoding'], encoder_outputs['mask'] # [BATCH, Am+Aa, F] [64, 236, 256] [64, 236]
 
         # level 0 decode
         last_content, last_level, last_score = self.initial_predictor(current_states, encoding, mask)
         decoder_outputs['level_0_interactions'] = last_level
         decoder_outputs['level_0_scores'] = last_score
+        decoder_outputs['level_0_content'] = last_content
         
         # level k reasoning
         for k in range(1, self.levels+1):
             interaction_decoder = self.interaction_stage[k-1]
-            last_content, last_level, last_score = interaction_decoder(current_states, last_level, last_score, last_content, encoding, mask)
+            last_content, last_level, last_score = interaction_decoder(current_states, last_level, last_score, last_content, encoding, mask, past_states)
             decoder_outputs[f'level_{k}_interactions'] = last_level
             decoder_outputs[f'level_{k}_scores'] = last_score
+            decoder_outputs[f'level_{k}_content'] = last_content
         
-        env_encoding = last_content[:, 0] # [64,11,6,256] -> [64,6,256]
+        # 整合每个level的content输出
+        all_levels_content = torch.stack([decoder_outputs[f'level_{k}_content'] for k in range(self.levels+1)], dim=1)
+        
+        final_content, final_level, final_score = self.final_predictor(all_levels_content, encoding, mask, current_states)
+
+        decoder_outputs[f'level_{self.levels+1}_interactions'] = final_level
+        decoder_outputs[f'level_{self.levels+1}_scores'] = final_score
+        decoder_outputs[f'level_{self.levels+1}_content'] = final_content
+
+        # decoder_outputs['all_levels_content'] = all_levels_content
+
+        env_encoding = final_content[:, 0] # [64,11,6,256] -> [64,6,256]
 
         return decoder_outputs, env_encoding
 

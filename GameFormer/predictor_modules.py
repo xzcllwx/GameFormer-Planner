@@ -61,20 +61,24 @@ class FutureEncoder(nn.Module):
         super(FutureEncoder, self).__init__()
         self.mlp = nn.Sequential(nn.Linear(5, 64), nn.ReLU(), nn.Linear(64, 256))
 
-    def state_process(self, trajs, current_states):
+    def state_process(self, trajs, current_states, past_states):
         M = trajs.shape[2]
-        current_states = current_states.unsqueeze(2).expand(-1, -1, M, -1)
-        xy = torch.cat([current_states[:, :, :, None, :2], trajs], dim=-2)
+        # current_states = current_states.unsqueeze(2).expand(-1, -1, M, -1) # [64,11,6,5]
+        past_states = past_states.unsqueeze(2).expand(-1, -1, M, -1, -1) # [64,11,6,21,5]
+        # xy = torch.cat([current_states[:, :, :, None, :2], trajs], dim=-2)
+        xy = torch.cat([past_states[:, :, :, :, :2], trajs], dim=-2)
         dxy = torch.diff(xy, dim=-2)
         v = dxy / 0.1
         theta = torch.atan2(dxy[..., 1], dxy[..., 0].clamp(min=1e-6)).unsqueeze(-1)
-        trajs = torch.cat([trajs, theta, v], dim=-1) # (x, y, heading, vx, vy)
+        trajs = torch.cat([xy[:, :, :, :-1, :2], theta, v], dim=-1) # (x, y, heading, vx, vy) [64,11,6,101,5]
 
         return trajs
 
-    def forward(self, trajs, current_states):
-        trajs = self.state_process(trajs, current_states)
+    def forward(self, trajs, current_states, past_states):
+        trajs = self.state_process(trajs, current_states, past_states)
         trajs = self.mlp(trajs.detach())
+        # map_encoding = F.max_pool2d(trajs.permute(0, 4, 1, 2, 3), kernel_size=(1, 10), stride=(1, 10)) # 减少点的数量
+        # map_encoding = map_encoding.permute(0, 2, 3, 4, 1).reshape(B, -1, D) # 融合Ne和Np两个维度
         output = torch.max(trajs, dim=-2).values
 
         return output
@@ -161,11 +165,12 @@ class InteractionDecoder(nn.Module):
         self.future_encoder = future_encoder
         self.decoder = GMMPredictor()
 
-    def forward(self, current_states, actors, scores, last_content, encoding, mask):
+    def forward(self, current_states, actors, scores, last_content, encoding, mask, past_states):
         N = actors.shape[1]
         
         # using future encoder to encode the future trajectories
-        multi_futures = self.future_encoder(actors[..., :2], current_states[:, :N]) # [64,11,6,256]
+        # multi_futures = self.future_encoder(actors[..., :2], current_states[:, :N]) # [64,11,6,256]
+        multi_futures = self.future_encoder(actors[..., :2], current_states[:, :N], past_states[:, :N]) # [64,11,6,256]
         # 加入位置编码，cat past轨迹
         # 与意图mlp后，根据终点选择目标车道，与目标车道编码cat，再mlp 或者 不mlp直接attention？
 
@@ -187,6 +192,42 @@ class InteractionDecoder(nn.Module):
         # using cross-attention to decode the future trajectories
         query = last_content + multi_futures
         query_content = torch.stack([self.query_encoder(query[:, i], encoding, encoding, mask[:, i]) for i in range(N)], dim=1)
+        trajectories, scores = self.decoder(query_content)
+        
+        # add the current states to the trajectories
+        trajectories[..., :2] += current_states[:, :N, None, None, :2]
+
+        return query_content, trajectories, scores
+    
+
+class FinalDecoder(nn.Module):
+    def __init__(self, modalities):
+        super(FinalDecoder, self).__init__()
+        self.modalities = modalities
+        self.interaction_encoder = SelfTransformer()
+        self.query_encoder = CrossTransformer()
+        self.decoder = GMMPredictor()
+
+    def forward(self, total_content, encoding, mask, current_states):
+        # total_content: [64,5,11,6,256]
+        N = total_content.shape[2]
+        agg_content = torch.max(total_content, dim=1)[0]  # 形状变为[B,N,M,D]
+
+        # using self-attention to encode the interaction
+        query = torch.stack([self.interaction_encoder(agg_content[:, i]) for i in range(N)], dim=1)
+        
+        # # append the interaction encoding to the common content
+        # encoding = torch.cat([interaction, encoding], dim=1) # [64,247,256]
+
+        # # mask out the corresponding agents
+        # mask = torch.cat([mask[:, :N], mask], dim=1) # [64,247]
+        # mask = mask.unsqueeze(1).expand(-1, N, -1).clone() # [64,11,247]
+        # for i in range(N):
+        #     mask[:, i, i] = 1
+
+        # using cross-attention to decode the future trajectories
+
+        query_content = torch.stack([self.query_encoder(query[:, i], encoding, encoding, mask) for i in range(N)], dim=1)
         trajectories, scores = self.decoder(query_content)
         
         # add the current states to the trajectories
