@@ -85,12 +85,12 @@ class GMMPredictor(nn.Module):
         super(GMMPredictor, self).__init__()
         self.modalities = modalities
         self._future_len = 80
-        self.gaussian = nn.Sequential(nn.Linear(256, 512), nn.ELU(), nn.Dropout(0.1), nn.Linear(512, self._future_len*4))
+        self.gaussian = nn.Sequential(nn.Linear(256, 512), nn.ELU(), nn.Dropout(0.1), nn.Linear(512, self._future_len*5))
         self.score = nn.Sequential(nn.Linear(256, 64), nn.ELU(), nn.Linear(64, 1))
     
     def forward(self, input):
         B, N, M, _ = input.shape
-        traj = self.gaussian(input).view(B, N, M, self._future_len, 4) # mu_x, mu_y, log_sig_x, log_sig_y
+        traj = self.gaussian(input).view(B, N, M, self._future_len, 5) # mu_x, mu_y, log_sig_x, log_sig_y
         score = self.score(input).squeeze(-1)
 
         return traj, score
@@ -122,7 +122,7 @@ class CrossTransformer(nn.Module):
 
     def forward(self, query, key, value, mask=None):
         attention_output, _ = self.cross_attention(query, key, value, key_padding_mask=mask)
-        attention_output = self.norm_1(attention_output)
+        attention_output = self.norm_1(attention_output + query) # 纠正cross attention的输出
         output = self.norm_2(self.ffn(attention_output) + attention_output)
 
         return output

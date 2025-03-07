@@ -44,7 +44,7 @@ class DrivingData(Dataset):
         return ego, neighbors, map_lanes, map_crosswalks, route_lanes, ego_future_gt, neighbors_future_gt
 
 
-def imitation_loss(gmm, scores, ground_truth):
+def imitation_loss(gmm, scores, ground_truth, log_std_range=(-1.609, 5.0), rho_limit=0.5):
     B, N = gmm.shape[0], gmm.shape[1]
     distance = torch.norm(gmm[:, :, :, :, :2] - ground_truth[:, :, None, :, :2], dim=-1) # [64,11,6,80]
     best_mode = torch.argmin(distance.mean(-1), dim=-1) # [64,11]
@@ -55,15 +55,25 @@ def imitation_loss(gmm, scores, ground_truth):
     dx = ground_truth[..., 0] - best_mode_mu[..., 0]
     dy = ground_truth[..., 1] - best_mode_mu[..., 1]
 
-    cov = gmm[..., 2:]
+    cov = gmm[..., 2:-1]
     best_mode_cov = cov[torch.arange(B)[:, None, None], torch.arange(N)[None, :, None], best_mode[:, :, None]]
     best_mode_cov = best_mode_cov.squeeze(2)
-    log_std_x = torch.clamp(best_mode_cov[..., 0], -2, 2)
-    log_std_y = torch.clamp(best_mode_cov[..., 1], -2, 2)
+    # log_std_x = torch.clamp(best_mode_cov[..., 0], -2, 2)
+    log_std_x = torch.clamp(best_mode_cov[..., 0], log_std_range[0], log_std_range[1])
+    log_std_y = torch.clamp(best_mode_cov[..., 1], log_std_range[0], log_std_range[1])
     std_x = torch.exp(log_std_x)
     std_y = torch.exp(log_std_y)
 
-    gmm_loss = log_std_x + log_std_y + 0.5 * (torch.square(dx/std_x) + torch.square(dy/std_y))
+    rho = gmm[..., 4]
+    best_mode_rho = rho[torch.arange(B)[:, None, None], torch.arange(N)[None, :, None], best_mode[:, :, None]]
+    best_mode_rho = best_mode_rho.squeeze(2)
+    rho = torch.clamp(best_mode_rho, -rho_limit, rho_limit)
+
+    reg_gmm_log_coefficient = log_std_x + log_std_y + 0.5 * torch.log(1 - torch.square(rho))
+    reg_gmm_exp = (0.5 * 1 / (1 - torch.square(rho))) * (torch.square(dx/std_x) + torch.square(dy/std_y) - 2 * rho * dx * dy / (std_x * std_y))  # (batch_size, num_timestamps)
+    gmm_loss = reg_gmm_log_coefficient + reg_gmm_exp                
+    # gmm_loss = log_std_x + log_std_y + 0.5 * (torch.square(dx/std_x) + torch.square(dy/std_y))
+
     gmm_loss = torch.mean(gmm_loss)
 
     score_loss = F.cross_entropy(scores.permute(0, 2, 1), best_mode, label_smoothing=0.2, reduction='none') # [64,11]
@@ -78,7 +88,7 @@ def imitation_loss(gmm, scores, ground_truth):
 
 def level_k_loss(outputs, ego_future, neighbors_future, neighbors_future_valid):
     loss: torch.tensor = 0
-    levels = len(outputs.keys()) // 2 
+    levels = len(outputs.keys()) // 3 
     gt_future = torch.cat([ego_future[:, None], neighbors_future], dim=1) # [64,11,80,3]
 
     for k in range(levels):
