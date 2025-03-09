@@ -90,7 +90,7 @@ class GMMPredictor(nn.Module):
     
     def forward(self, input):
         B, N, M, _ = input.shape
-        traj = self.gaussian(input).view(B, N, M, self._future_len, 5) # mu_x, mu_y, log_sig_x, log_sig_y
+        traj = self.gaussian(input).view(B, N, M, self._future_len, 5) # mu_x, mu_y, log_sig_x, log_sig_y, rho
         score = self.score(input).squeeze(-1)
 
         return traj, score

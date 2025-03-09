@@ -55,7 +55,7 @@ def imitation_loss(gmm, scores, ground_truth, log_std_range=(-1.609, 5.0), rho_l
     dx = ground_truth[..., 0] - best_mode_mu[..., 0]
     dy = ground_truth[..., 1] - best_mode_mu[..., 1]
 
-    cov = gmm[..., 2:-1]
+    cov = gmm[..., 2:4]
     best_mode_cov = cov[torch.arange(B)[:, None, None], torch.arange(N)[None, :, None], best_mode[:, :, None]]
     best_mode_cov = best_mode_cov.squeeze(2)
     # log_std_x = torch.clamp(best_mode_cov[..., 0], -2, 2)
@@ -64,8 +64,8 @@ def imitation_loss(gmm, scores, ground_truth, log_std_range=(-1.609, 5.0), rho_l
     std_x = torch.exp(log_std_x)
     std_y = torch.exp(log_std_y)
 
-    rho = gmm[..., 4]
-    best_mode_rho = rho[torch.arange(B)[:, None, None], torch.arange(N)[None, :, None], best_mode[:, :, None]]
+    all_rho = gmm[..., 4]
+    best_mode_rho = all_rho[torch.arange(B)[:, None, None], torch.arange(N)[None, :, None], best_mode[:, :, None]]
     best_mode_rho = best_mode_rho.squeeze(2)
     rho = torch.clamp(best_mode_rho, -rho_limit, rho_limit)
 
@@ -88,7 +88,7 @@ def imitation_loss(gmm, scores, ground_truth, log_std_range=(-1.609, 5.0), rho_l
 
 def level_k_loss(outputs, ego_future, neighbors_future, neighbors_future_valid):
     loss: torch.tensor = 0
-    levels = len(outputs.keys()) // 3 
+    levels = len(outputs.keys()) // 2
     gt_future = torch.cat([ego_future[:, None], neighbors_future], dim=1) # [64,11,80,3]
 
     for k in range(levels):

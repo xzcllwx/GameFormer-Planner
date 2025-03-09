@@ -24,15 +24,15 @@ def train_epoch(data_loader, model, optimizer):
         for batch in data_epoch:
             # prepare data
             inputs = {
-                'ego_agent_past': batch[0].to(args.device),
-                'neighbor_agents_past': batch[1].to(args.device),
-                'map_lanes': batch[2].to(args.device),
-                'map_crosswalks': batch[3].to(args.device),
-                'route_lanes': batch[4].to(args.device)
+                'ego_agent_past': batch[0].to(args.device, non_blocking=True),
+                'neighbor_agents_past': batch[1].to(args.device, non_blocking=True),
+                'map_lanes': batch[2].to(args.device, non_blocking=True),
+                'map_crosswalks': batch[3].to(args.device, non_blocking=True),
+                'route_lanes': batch[4].to(args.device, non_blocking=True)
             }
 
-            ego_future = batch[5].to(args.device)
-            neighbors_future = batch[6].to(args.device)
+            ego_future = batch[5].to(args.device, non_blocking=True)
+            neighbors_future = batch[6].to(args.device, non_blocking=True)
             neighbors_future_valid = torch.ne(neighbors_future[..., :2], 0)
 
             # call the mdoel
@@ -45,6 +45,11 @@ def train_epoch(data_loader, model, optimizer):
 
             # loss backward
             loss.backward()
+
+            # if is_main_process():
+            #     ls = [name for name,para in model.named_parameters() if para.grad==None]
+            #     print(ls)
+
             nn.utils.clip_grad_norm_(model.parameters(), 5)
             optimizer.step()
 
@@ -77,15 +82,15 @@ def valid_epoch(data_loader, model):
         for batch in data_epoch:
            # prepare data
             inputs = {
-                'ego_agent_past': batch[0].to(args.device),
-                'neighbor_agents_past': batch[1].to(args.device),
-                'map_lanes': batch[2].to(args.device),
-                'map_crosswalks': batch[3].to(args.device),
-                'route_lanes': batch[4].to(args.device)
+                'ego_agent_past': batch[0].to(args.device, non_blocking=True),
+                'neighbor_agents_past': batch[1].to(args.device, non_blocking=True),
+                'map_lanes': batch[2].to(args.device, non_blocking=True),
+                'map_crosswalks': batch[3].to(args.device, non_blocking=True),
+                'route_lanes': batch[4].to(args.device, non_blocking=True)
             }
 
-            ego_future = batch[5].to(args.device)
-            neighbors_future = batch[6].to(args.device)
+            ego_future = batch[5].to(args.device, non_blocking=True)
+            neighbors_future = batch[6].to(args.device, non_blocking=True)
             neighbors_future_valid = torch.ne(neighbors_future[..., :2], 0)
 
             # call the mdoel
@@ -143,6 +148,7 @@ def model_training():
     # )
     train_loader = DataLoader(
         train_set, batch_size=batch_size, sampler=train_sampler, num_workers=args.workers, shuffle=False,
+        pin_memory=True, prefetch_factor=16, persistent_workers=True
     )
     # train_loader = DataLoader(
     #     train_set, batch_size=batch_size, sampler=train_sampler, num_workers=os.cpu_count(), shuffle=False,
@@ -154,6 +160,7 @@ def model_training():
     # )
     valid_loader = DataLoader(
         valid_set, batch_size=batch_size, sampler=valid_sampler, num_workers=args.workers, shuffle=False,
+        pin_memory=True
     )
     # valid_loader = DataLoader(
     #     valid_set, batch_size=batch_size, sampler=valid_sampler, num_workers=os.cpu_count(), shuffle=False,
@@ -163,15 +170,15 @@ def model_training():
     # set up model
     gameformer = GameFormer(encoder_layers=args.encoder_layers, decoder_levels=args.decoder_levels, neighbors=args.num_neighbors)
     gameformer = gameformer.to(args.device)
-    if torch.cuda.device_count() > 1:
-        gameformer=torch.nn.parallel.DistributedDataParallel(gameformer, device_ids=[args.local_rank], output_device=args.local_rank)
+    # gameformer=torch.nn.parallel.DistributedDataParallel(gameformer, device_ids=[args.local_rank], output_device=args.local_rank,find_unused_parameters=True,)
+    gameformer=torch.nn.parallel.DistributedDataParallel(gameformer, device_ids=[args.local_rank], output_device=args.local_rank)
 
     if is_main_process():
         logging.info("Model Params: {}".format(sum(p.numel() for p in gameformer.parameters())))
 
     # set up optimizer
     optimizer = optim.AdamW(gameformer.parameters(), lr=args.learning_rate)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[10, 12, 14, 16, 18], gamma=0.5)
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[10, 13, 16, 19, 22, 25, 28], gamma=0.5)
 
     # begin training
     for epoch in range(train_epochs):
@@ -208,7 +215,7 @@ def model_training():
         scheduler.step()
 
         # save model at the end of epoch
-        if is_main_process() and (epoch+1) % 5 == 0:
+        if is_main_process():
             torch.save(gameformer.module.state_dict(), f'training_log/{args.name}/model_epoch_{epoch+1}_valADE_{val_metrics[0]:.4f}.pth')
             logging.info(f"Model saved in training_log/{args.name}\n")
         # print(f"thread {args.local_rank} finished epoch {epoch+1}\n")

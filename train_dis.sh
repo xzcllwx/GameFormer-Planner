@@ -28,9 +28,9 @@ python -m torch.distributed.launch \
     --nnodes=1 \
     --node_rank=${RANK} \
     train_predictor_dis.py \
-    --train_set /root/data/alstar/nuplan/dataset/nuplan-v1.1/splits/mini_process \
-    --valid_set /root/data/alstar/nuplan/dataset/nuplan-v1.1/splits/val_process \
-    --batch_size 128 \
-    --train_epochs 40 \
-    --name Exp1 \
-    --workers=8
+    --train_set /root/xzcllwx_ws/nuplan_dataset_process/train_4M \
+    --valid_set /root/xzcllwx_ws/nuplan_dataset_process/val_process \
+    --batch_size 256 \
+    --train_epochs 30 \
+    --name Exp2 \
+    --workers=16
