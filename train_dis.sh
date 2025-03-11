@@ -32,5 +32,6 @@ python -m torch.distributed.launch \
     --valid_set /root/xzcllwx_ws/nuplan_dataset_process/val_process \
     --batch_size 256 \
     --train_epochs 30 \
-    --name Exp2 \
-    --workers=16
+    --name Exp3 \
+    --workers=8 \
+    --resume /root/xzcllwx_ws/GameFormer-Planner/training_log/Exp2/model_epoch_28_valADE_1.1344.pth 

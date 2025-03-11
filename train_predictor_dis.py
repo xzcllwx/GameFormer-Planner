@@ -11,7 +11,7 @@ from GameFormer.predictor import GameFormer
 from torch.utils.data import DataLoader
 from GameFormer.train_utils import *
 from torch.utils.data.distributed import DistributedSampler
-
+from torch.utils.tensorboard import SummaryWriter
 
 def is_main_process():
     return dist.get_rank() == 0
@@ -130,7 +130,8 @@ def model_training():
         logging.info("Batch size: {}".format(args.batch_size))
         logging.info("Learning rate: {}".format(args.learning_rate))
         logging.info("Use device: {}".format(args.device))
-
+        tensorboard_writer = SummaryWriter(log_dir=log_path)
+        
     # set seed
     set_seed(args.seed)
 
@@ -154,12 +155,12 @@ def model_training():
     #     train_set, batch_size=batch_size, sampler=train_sampler, num_workers=os.cpu_count(), shuffle=False,
     # )
 
-    valid_sampler = DistributedSampler(valid_set, shuffle=False)
+    # valid_sampler = DistributedSampler(valid_set, shuffle=False)
     # valid_loader = torch.utils.data.DataLoader(
     #     valid_set, batch_size=args.batch_size, sampler=valid_sampler
     # )
     valid_loader = DataLoader(
-        valid_set, batch_size=batch_size, sampler=valid_sampler, num_workers=args.workers, shuffle=False,
+        valid_set, batch_size=batch_size*4, num_workers=args.workers, shuffle=False,
         pin_memory=True
     )
     # valid_loader = DataLoader(
@@ -170,6 +171,33 @@ def model_training():
     # set up model
     gameformer = GameFormer(encoder_layers=args.encoder_layers, decoder_levels=args.decoder_levels, neighbors=args.num_neighbors)
     gameformer = gameformer.to(args.device)
+
+    start_epoch = 0
+    # 加载预训练模型（如果指定）
+    if args.resume is not None:
+        epoch_str = os.path.basename(args.resume).split('model_epoch_')[1].split('_')[0]
+        start_epoch = int(epoch_str)
+        if is_main_process():
+            logging.info(f"Loading pre-trained model from {args.resume}")
+            logging.info(f"Start training from epoch {start_epoch+1}")
+        # 从文件名解析epoch信息
+        checkpoint = torch.load(args.resume, map_location=args.device)
+        
+        # 尝试直接加载模型权重
+        try:
+            gameformer.load_state_dict(checkpoint)
+            if is_main_process():
+                logging.info("Successfully loaded model weights")
+        except Exception as e:
+            # 如果直接加载失败，尝试提取模型状态字典（可能是保存了完整的checkpoint）
+            if 'model_state_dict' in checkpoint:
+                gameformer.load_state_dict(checkpoint['model_state_dict'])
+                if is_main_process():
+                    logging.info("Successfully loaded model weights from checkpoint state dict")
+            else:
+                if is_main_process():
+                    logging.warning(f"Failed to load weights: {str(e)}")
+    
     # gameformer=torch.nn.parallel.DistributedDataParallel(gameformer, device_ids=[args.local_rank], output_device=args.local_rank,find_unused_parameters=True,)
     gameformer=torch.nn.parallel.DistributedDataParallel(gameformer, device_ids=[args.local_rank], output_device=args.local_rank)
 
@@ -180,19 +208,42 @@ def model_training():
     optimizer = optim.AdamW(gameformer.parameters(), lr=args.learning_rate)
     scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[10, 13, 16, 19, 22, 25, 28], gamma=0.5)
 
+    OnlyVal = False
+    
     # begin training
-    for epoch in range(train_epochs):
+    for epoch in range(start_epoch, train_epochs):
         if is_main_process():
+            for _ in range(start_epoch):
+                scheduler.step()
             logging.info(f"Epoch {epoch+1}/{train_epochs}")
         train_loader.sampler.set_epoch(epoch)
-        valid_loader.sampler.set_epoch(epoch)
-
-        train_loss, train_metrics = train_epoch(train_loader, gameformer, optimizer)
+        # valid_loader.sampler.set_epoch(epoch)
+        if not OnlyVal:
+            train_loss, train_metrics = train_epoch(train_loader, gameformer, optimizer)
         dist.barrier()
-        
-        val_loss, val_metrics = valid_epoch(valid_loader, gameformer.module)
         if is_main_process():
-        # save to training log
+            val_loss, val_metrics = valid_epoch(valid_loader, gameformer.module)
+        dist.barrier()
+        if is_main_process():
+            tensorboard_writer.add_scalar('Loss/train', train_loss, epoch)
+            tensorboard_writer.add_scalar('Loss/val', val_loss, epoch)
+            tensorboard_writer.add_scalar('Metrics/train_planningADE', train_metrics[0], epoch)
+            tensorboard_writer.add_scalar('Metrics/train_planningFDE', train_metrics[1], epoch)
+            tensorboard_writer.add_scalar('Metrics/train_planningAHE', train_metrics[2], epoch)
+            tensorboard_writer.add_scalar('Metrics/train_planningFHE', train_metrics[3], epoch)
+            tensorboard_writer.add_scalar('Metrics/train_predictionADE', train_metrics[4], epoch)
+            tensorboard_writer.add_scalar('Metrics/train_predictionFDE', train_metrics[5], epoch)
+            
+            tensorboard_writer.add_scalar('Metrics/val_planningADE', val_metrics[0], epoch)
+            tensorboard_writer.add_scalar('Metrics/val_planningFDE', val_metrics[1], epoch)
+            tensorboard_writer.add_scalar('Metrics/val_planningAHE', val_metrics[2], epoch)
+            tensorboard_writer.add_scalar('Metrics/val_planningFHE', val_metrics[3], epoch)
+            tensorboard_writer.add_scalar('Metrics/val_predictionADE', val_metrics[4], epoch)
+            tensorboard_writer.add_scalar('Metrics/val_predictionFDE', val_metrics[5], epoch)
+            
+            tensorboard_writer.add_scalar('LR', optimizer.param_groups[0]['lr'], epoch)
+            
+            # save to training log
             log = {'epoch': epoch+1, 'loss': train_loss, 'lr': optimizer.param_groups[0]['lr'], 'val-loss': val_loss, 
                 'train-planningADE': train_metrics[0], 'train-planningFDE': train_metrics[1], 
                 'train-planningAHE': train_metrics[2], 'train-planningFHE': train_metrics[3], 
@@ -220,6 +271,9 @@ def model_training():
             logging.info(f"Model saved in training_log/{args.name}\n")
         # print(f"thread {args.local_rank} finished epoch {epoch+1}\n")
         dist.barrier()
+        
+    if is_main_process():
+        tensorboard_writer.close()
 
 
 if __name__ == "__main__":
@@ -237,6 +291,7 @@ if __name__ == "__main__":
     parser.add_argument('--learning_rate', type=float, help='learning rate (default: 1e-4)', default=1e-4)
     parser.add_argument('--device', type=str, help='run on which device (default: cuda)', default='cuda')
     parser.add_argument("--workers", type=int, default=8, help="number of workers used for dataloader")
+    parser.add_argument('--resume', type=str, help='path to pre-trained model (default: None)', default=None)
 
     parser.add_argument('--local_rank', type=int, default=0)
     args = parser.parse_args()
