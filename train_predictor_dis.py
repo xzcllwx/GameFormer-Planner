@@ -174,14 +174,16 @@ def model_training():
 
     start_epoch = 0
     # 加载预训练模型（如果指定）
-    if args.resume is not None:
-        epoch_str = os.path.basename(args.resume).split('model_epoch_')[1].split('_')[0]
-        start_epoch = int(epoch_str)
-        if is_main_process():
-            logging.info(f"Loading pre-trained model from {args.resume}")
-            logging.info(f"Start training from epoch {start_epoch+1}")
-        # 从文件名解析epoch信息
-        checkpoint = torch.load(args.resume, map_location=args.device)
+    if args.checkpoint is not None:
+        epoch_str = os.path.basename(args.checkpoint).split('model_epoch_')[1].split('_')[0]
+        if args.resume:   
+            # 从文件名解析epoch信息
+            start_epoch = int(epoch_str)
+            if is_main_process():
+                logging.info(f"Start training from epoch {start_epoch+1}")
+
+        logging.info(f"Loading pre-trained model from {args.checkpoint}")
+        checkpoint = torch.load(args.checkpoint, map_location=args.device)
         
         # 尝试直接加载模型权重
         try:
@@ -197,19 +199,44 @@ def model_training():
             else:
                 if is_main_process():
                     logging.warning(f"Failed to load weights: {str(e)}")
+        
+    gameformer=torch.nn.parallel.DistributedDataParallel(
+        gameformer, 
+        device_ids=[args.local_rank], 
+        output_device=args.local_rank,
+        find_unused_parameters= args.stage == 2,
+    )
     
-    # gameformer=torch.nn.parallel.DistributedDataParallel(gameformer, device_ids=[args.local_rank], output_device=args.local_rank,find_unused_parameters=True,)
-    gameformer=torch.nn.parallel.DistributedDataParallel(gameformer, device_ids=[args.local_rank], output_device=args.local_rank)
+    total_params = sum(p.numel() for p in gameformer.module.parameters())
 
+    if args.stage == 1:
+        frozen_params = 0
+        if is_main_process():
+            logging.info(f"stage 1：frozen parameters {frozen_params}/{total_params} ({frozen_params/total_params:.2%})")
+    elif args.stage == 2:
+        frozen_params = 0
+        for name, param in gameformer.named_parameters():
+            if 'planner' not in name:
+                param.requires_grad = False
+                frozen_params += param.numel()
+        if is_main_process():
+            logging.info(f"stage 2：frozen parameters {frozen_params}/{total_params} ({frozen_params/total_params:.2%})")
+    else :
+        logging.info("stage error")
+        return
+    
     if is_main_process():
-        logging.info("Model Params: {}".format(sum(p.numel() for p in gameformer.parameters())))
+        # for name, param in gameformer.module.named_parameters():
+        #     logging.info(f"{name}: {param.requires_grad}")
+        logging.info("Model Params: {}".format(total_params))
+        logging.info("Start epoch: {}".format(start_epoch))
+        logging.info("Training for {} epochs\n".format(train_epochs))
 
     # set up optimizer
-    optimizer = optim.AdamW(gameformer.parameters(), lr=args.learning_rate)
+    # optimizer = optim.AdamW(gameformer.parameters(), lr=args.learning_rate)
+    optimizer = optim.AdamW(filter(lambda p : p.requires_grad, gameformer.parameters()), lr=args.learning_rate)
     scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[10, 13, 16, 19, 22, 25, 28], gamma=0.5)
 
-    OnlyVal = False
-    
     # begin training
     for epoch in range(start_epoch, train_epochs):
         if is_main_process():
@@ -218,7 +245,7 @@ def model_training():
             logging.info(f"Epoch {epoch+1}/{train_epochs}")
         train_loader.sampler.set_epoch(epoch)
         # valid_loader.sampler.set_epoch(epoch)
-        if not OnlyVal:
+        if not args.val:
             train_loss, train_metrics = train_epoch(train_loader, gameformer, optimizer)
         dist.barrier()
         if is_main_process():
@@ -291,8 +318,10 @@ if __name__ == "__main__":
     parser.add_argument('--learning_rate', type=float, help='learning rate (default: 1e-4)', default=1e-4)
     parser.add_argument('--device', type=str, help='run on which device (default: cuda)', default='cuda')
     parser.add_argument("--workers", type=int, default=8, help="number of workers used for dataloader")
-    parser.add_argument('--resume', type=str, help='path to pre-trained model (default: None)', default=None)
-
+    parser.add_argument('--stage', type=int, default=1, help='训练阶段 (1: 预测, 2: 规划)')
+    parser.add_argument('--checkpoint', type=str, help='path to pre-trained model (default: None)', default=None)
+    parser.add_argument('--resume', action='store_true', help='set start epoch to resume training')
+    parser.add_argument('--val', action='store_true', help='only validate the model')
     parser.add_argument('--local_rank', type=int, default=0)
     args = parser.parse_args()
     # distributed training

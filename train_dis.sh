@@ -34,4 +34,7 @@ python -m torch.distributed.launch \
     --train_epochs 30 \
     --name Exp3 \
     --workers=8 \
-    --resume /root/xzcllwx_ws/GameFormer-Planner/training_log/Exp2/model_epoch_28_valADE_1.1344.pth 
+    --stage 2 \
+    --checkpoint /root/xzcllwx_ws/GameFormer-Planner/training_log/Exp2/model_epoch_30_valADE_1.1352.pth \
+    # --resume \
+    # --val \
