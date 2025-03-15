@@ -32,7 +32,10 @@ from nuplan.planning.simulation.simulation import Simulation
 from nuplan.planning.simulation.simulation_setup import SimulationSetup
 from nuplan.planning.nuboard.nuboard import NuBoard
 from nuplan.planning.nuboard.base.data_class import NuBoardFile
+from nuplan.planning.script.builders.scenario_filter_builder import build_scenario_filter
 
+
+from omegaconf import DictConfig, OmegaConf
 
 def build_simulation_experiment_folder(output_dir, simulation_dir, metric_dir, aggregator_metric_dir):
     """
@@ -198,7 +201,8 @@ def main(args):
     map_version = "nuplan-maps-v1.0"
     scenario_mapping = ScenarioMapping(scenario_map=get_scenario_map(), subsample_ratio_override=0.5)
     builder = NuPlanScenarioBuilder(data_root, map_root, sensor_root, db_files, map_version, scenario_mapping=scenario_mapping)
-    scenario_filter = ScenarioFilter(*get_filter_parameters(args.scenarios_per_type, args.total_scenarios, args.shuffle_scenarios))
+    # scenario_filter = ScenarioFilter(*get_filter_parameters(args.scenarios_per_type, args.total_scenarios, args.shuffle_scenarios))
+    scenario_filter = build_scenario_filter(cfg = args.scenario_filter)
     worker = SingleMachineParallelExecutor(use_process_pool=True)
     scenarios = builder.get_scenarios(scenario_filter, worker)
     del worker, scenario_filter, scenario_mapping
@@ -222,6 +226,13 @@ if __name__ == "__main__":
     parser.add_argument('--scenarios_per_type', type=int, default=10, help='number of scenarios per type')
     parser.add_argument('--total_scenarios', default=None, help='limit total number of scenarios')
     parser.add_argument('--shuffle_scenarios', type=bool, default=False, help='shuffle scenarios')
+    parser.add_argument('--config_path', type=str, default=None, help='filter for specific scenarios (JSON format)')
+    parser.add_argument('--scenario_filter', type=DictConfig, default=None, help='filter for specific scenarios (JSON format)')
     args = parser.parse_args()
-
+    if args.config_path:
+        config = OmegaConf.load(args.config_path)
+        args.scenario_filter = config
+    else:
+        args.scenario_filter = None
+        raise ValueError('Please provide a config path')
     main(args)
