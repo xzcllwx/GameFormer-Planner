@@ -12,6 +12,11 @@ from nuplan.planning.simulation.planner.abstract_planner import AbstractPlanner,
 from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
 from nuplan.planning.simulation.observation.idm.utils import path_to_linestring
 
+import sys
+import os
+sys.path.append("/root/xzcllwx_ws")
+from pluto.src.utils.vis import *
+from pluto.src.feature_builders.nuplan_scenario_render import *
 
 class Planner(AbstractPlanner):
     def __init__(self, model_path, device=None):
@@ -30,6 +35,8 @@ class Planner(AbstractPlanner):
             device = torch.device('cpu')
 
         self._device = device
+        
+        self._render = False
     
     def name(self) -> str:
         return "GameFormer Planner"
@@ -38,13 +45,19 @@ class Planner(AbstractPlanner):
         return DetectionsTracks
 
     def initialize(self, initialization: PlannerInitialization):
+        self._initialization = initialization
         self._map_api = initialization.map_api
-        self._goal = initialization.mission_goal
+        self._goal = initialization.mission_goal # mission goal StateSE2
         self._route_roadblock_ids = initialization.route_roadblock_ids
         self._initialize_route_plan(self._route_roadblock_ids)
         self._initialize_model()
         self._trajectory_planner = TrajectoryPlanner()
         self._path_planner = LatticePlanner(self._candidate_lane_edge_ids, self._max_path_length)
+        self._scene_render = NuplanScenarioRender()
+        self._imgs = []
+        self._save_dir = '/root/xzcllwx_ws/GameFormer-Planner/figure'
+        if not os.path.exists(self._save_dir):
+            os.makedirs(self._save_dir)
 
     def _initialize_model(self):
         # The parameters of the model should be the same as the one used in training
@@ -128,12 +141,14 @@ class Planner(AbstractPlanner):
         final_scores = predictions[f'level_{K}_scores']
         ego_current = features['ego_agent_past'][:, -1]
         neighbors_current = features['neighbor_agents_past'][:, :, -1]
+        final_scores = torch.nn.functional.softmax(final_scores, dim=-1)
 
         return plan, final_predictions, final_scores, ego_current, neighbors_current
     
     def _plan(self, ego_state, history, traffic_light_data, observation):
         # Construct input features
-        features = observation_adapter(history, traffic_light_data, self._map_api, self._route_roadblock_ids, self._device)
+        # 转换到了ego坐标系下
+        features = observation_adapter(history, traffic_light_data, self._map_api, self._route_roadblock_ids, self._device) 
 
         # Get reference path
         ref_path = self._get_reference_path(ego_state, traffic_light_data, observation)
@@ -149,8 +164,19 @@ class Planner(AbstractPlanner):
             
         states = transform_predictions_to_states(plan, history.ego_states, self._future_horizon, DT)
         trajectory = InterpolatedTrajectory(states)
+        
+        _, N, _, _, _ = predictions.shape
+        scores = scores.squeeze(0)  # 移除批次维度，变成 [N, M]
+        scores =  scores[1:, :]  # 移除第一个agent的预测
+        predictions = predictions.squeeze(0)  # 移除批次维度，变成 [N, M, T, D]
+        
+        best_indices = torch.argmax(scores, dim=1)  # 维度 [N]
+        agent_indices = torch.arange(N)  # 维度 [N]
 
-        return trajectory
+        best_trajectories = predictions[agent_indices, best_indices]  # 维度 [N, T, D]
+
+        return trajectory, plan, best_trajectories.cpu().numpy()
+        # return trajectory, plan, predictions[0].reshape(-1, T, D).cpu().numpy()
     
     def compute_planner_trajectory(self, current_input: PlannerInput):
         s = time.time()
@@ -158,7 +184,36 @@ class Planner(AbstractPlanner):
         history = current_input.history
         traffic_light_data = list(current_input.traffic_light_data)
         ego_state, observation = history.current_state
-        trajectory = self._plan(ego_state, history, traffic_light_data, observation)
+        trajectory, plan, predictions = self._plan(ego_state, history, traffic_light_data, observation)
+        
+        self._render = False
+        
+        if self._render:
+            self._imgs.append(
+                    self._scene_render.render_from_simulation(
+                        current_input=current_input,
+                        initialization=self._initialization,
+                        route_roadblock_ids=self._route_roadblock_ids,
+                        iteration=current_input.iteration.index,
+                        planning_trajectory=plan[:, :2],
+                        predictions=predictions,
+                        return_img=self._render,
+                    )
+            )
+            filename= f'{iteration}.png'
+            img = self._imgs[-1]
+            plt.imsave(os.path.join(self._save_dir, filename), img)
+        else:
+            self._scene_render.render_from_simulation(
+                current_input=current_input,
+                initialization=self._initialization,
+                route_roadblock_ids=self._route_roadblock_ids,
+                iteration=current_input.iteration.index,
+                planning_trajectory=plan[:, :2],
+                predictions=predictions,
+                return_img=self._render,
+            )
+            
         print(f'Iteration {iteration}: {time.time() - s:.3f} s')
 
         return trajectory

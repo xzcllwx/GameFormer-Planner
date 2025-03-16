@@ -31,14 +31,14 @@ class LatticePlanner:
             path_polyline = []
             for edge in path:
                 path_polyline.extend(edge.baseline_path.discrete_path)
-
+            # 可视化看一下path_polyline
             path_polyline = self.check_path(np.array(path_to_linestring(path_polyline).coords))
             dist_to_ego = scipy.spatial.distance.cdist([self.ego_point], path_polyline)
             path_polyline = path_polyline[dist_to_ego.argmin():]
             if len(path_polyline) < 3:
                 continue
 
-            path_len = len(path_polyline) * 0.25
+            path_len = len(path_polyline) * 0.25 # 点间距为0.25m
             polyline_heading = self.calculate_path_heading(path_polyline)
             path_polyline = np.stack([path_polyline[:, 0], path_polyline[:, 1], polyline_heading], axis=1)
             candidate_paths[i] = (path_len, dist_to_ego.min(), path, path_polyline)
@@ -77,7 +77,7 @@ class LatticePlanner:
     def plan(self, ego_state, starting_block, observation, traffic_light_data):
         # Get candidate paths
         edges = self.get_candidate_edges(starting_block, ego_state)
-        candidate_paths = self.get_candidate_paths(edges)
+        candidate_paths = self.get_candidate_paths(edges) # 全局路由
 
         if candidate_paths is None:
             return None
@@ -88,8 +88,8 @@ class LatticePlanner:
                         TrackedObjectType.GENERIC_OBJECT]
         objects = observation.tracked_objects.get_tracked_objects_of_types(object_types)
 
-        obstacles = []
-        vehicles = []
+        obstacles = [] # 静态障碍物
+        vehicles = [] # 动态障碍物
         for obj in objects:
             if obj.box.geometry.distance(ego_state.car_footprint.geometry) > 30:
                 continue
@@ -103,7 +103,7 @@ class LatticePlanner:
                 obstacles.append(obj.box)
 
         # Generate paths using state lattice
-        paths = self.generate_paths(ego_state, candidate_paths)
+        paths = self.generate_paths(ego_state, candidate_paths) # 纵向采样
 
         # disable lane change in large intersections
         if len(traffic_light_data) > 0:
@@ -146,7 +146,7 @@ class LatticePlanner:
                 sampled_index = [1]
      
             target_states = path_polyline[sampled_index].tolist()
-            for j, state in enumerate(target_states):
+            for j, state in enumerate(target_states): # 根据路径长度，从全局路径中采样，同时采样点后续的点采用全局路径点
                 first_stage_path = calc_4points_bezier_path(ego_state[0], ego_state[1], ego_state[2], 
                                                             state[0], state[1], state[2], 3, sampled_index[j])[0]
                 second_stage_path = path_polyline[sampled_index[j]+1:, :2]
@@ -180,7 +180,7 @@ class LatticePlanner:
         return cost
 
     def post_process(self, path, ego_state):
-        index = np.arange(0, len(path), 10)
+        index = np.arange(0, len(path), 10) # 2.5m采样
         x = path[:, 0][index]
         y = path[:, 1][index]
         rx, ry, ryaw, rk = calc_spline_course(x, y)

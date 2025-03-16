@@ -79,15 +79,54 @@ def compare_text_files(file1_path, file2_path):
     # 返回共同行的数量和内容
     return len(common_lines), common_lines
 
+def copy_random_files(src_dir, dst_dir, record_file, num_files=1000000):
+    # 递归获取源文件夹中的所有文件
+    files = []
+    for root, _, filenames in os.walk(src_dir):
+        for filename in filenames:
+            files.append(os.path.relpath(os.path.join(root, filename), src_dir))
+    
+    # 如果文件总数少于要求的数量，则全部复制
+    if len(files) <= num_files:
+        selected_files = files
+        print(f"Total files: {len(files)}, all will be copied")
+    else:
+        # 随机选择指定数量的文件
+        random.shuffle(files)
+        selected_files = files[:num_files]
+        print(f"Total files: {len(files)}, randomly selecting {num_files} files")
+    
+    # 确保目标文件夹存在
+    os.makedirs(dst_dir, exist_ok=True)
+    
+    # 复制文件并记录文件名
+    with open(record_file, 'w') as f:
+        for file in tqdm(selected_files, desc=f"Copying {num_files} random files"):
+            src_file = os.path.join(src_dir, file)
+            dst_file = os.path.join(dst_dir, file)
+            
+            # 确保目标子目录存在
+            os.makedirs(os.path.dirname(dst_file), exist_ok=True)
+            
+            # 复制文件
+            shutil.copy2(src_file, dst_file)
+            f.write(f"{file}\n")
+    
+    print(f"Successfully copied {len(selected_files)} files to {dst_dir}")
+
 if __name__ == "__main__":
-    src_dir = "/root/data/alstar/nuplan/dataset/nuplan-v1.1/splits/train"  # 替换为源文件夹路径
-    dst_dir = "/root/xzcllwx_ws/nuplan_dataset_process/train_half"  # 替换为目标文件夹路径
-    record_file = "/root/xzcllwx_ws/nuplan_dataset_process/cp_half.txt"  # 替换为记录文件路径
-    remain_file = "/root/xzcllwx_ws/nuplan_dataset_process/cp_remain.txt"  # 替换为记录文件路径
+    src_dir = "/root/data/alstar/womd/scenario/validation_process"  # 替换为源文件夹路径
+    dst_dir = "/root/xzcllwx_ws/womd_process/womd_val_10K"  # 替换为目标文件夹路径
+    # record_file = "/root/xzcllwx_ws/nuplan_dataset_process/cp_half.txt"  # 替换为记录文件路径
+    womd_record_file = "/root/xzcllwx_ws/womd_process/womd_val_10K.txt"  # 替换为记录文件路径
+    # remain_file = "/root/xzcllwx_ws/nuplan_dataset_process/cp_remain.txt"  # 替换为记录文件路径
 
     # copy_and_record_files(src_dir, dst_dir, record_file)
 
     # copy_remaining_files(src_dir, dst_dir, record_file, remain_file)
 
-    count, common = compare_text_files(record_file, remain_file)
+    # count, common = compare_text_files(record_file, remain_file)
+    
+    copy_random_files(src_dir, dst_dir, womd_record_file, num_files=100000)
+
     print("Done!")
