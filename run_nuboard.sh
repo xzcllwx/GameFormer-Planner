@@ -1,0 +1,2 @@
+python /nuplan_devkit/nuplan/planning/script/run_nuboard.py \
+    simulation_path="[/root/xzcllwx_ws/GameFormer-Planner/testing_log/open_loop_boxes/gameformer_planner/2025-03-14 12:19:23.893662/nuboard_1741951163.nuboard]"
