@@ -60,6 +60,7 @@ class Planner(AbstractPlanner):
         
         self._render = False
         self._time = False
+        self._N_agent = 10
         # load settings from planning_fast.json
         settings_dict = load_planning_json("planning_fast.json")
         settings_dict["risk_dict"] = risk_dict = load_risk_json()
@@ -116,7 +117,6 @@ class Planner(AbstractPlanner):
     
     
     def _add_obstacle(self):
-        self._N_agent = 10
         init_state_args = dict()
         init_state_args['position'] = np.array([0, 0])
         init_state_args['orientation'] = 0
@@ -298,10 +298,26 @@ class Planner(AbstractPlanner):
 
         return plan, final_predictions, final_scores, ego_current, neighbors_current
     
-    def _plan(self, ego_state, history, traffic_light_data, observation):
+    def _update_scenario_by_feature(self, features, N_agent):
+        for i in range(N_agent):
+            agent = features['neighbor_agents_past'][0][i]
+            if torch.eq(agent[-1].sum(-1), 0):
+                return i
+            length = agent[-1][6]
+            width = agent[-1][7]
+            object = self.__scenario.obstacle_by_id(i+1)
+            obstacle_shape = Rectangle(width=width, length=length)
+            if object is not None:
+                object.obstacle_shape = obstacle_shape
+        return N_agent
+    
+    def _plan(self, iteration, ego_state, history, traffic_light_data, observation):
         # Construct input features
         # 转换到了ego坐标系下
         features = observation_adapter(history, traffic_light_data, self._map_api, self._route_roadblock_ids, self._device) 
+
+        # update the scenario by feature
+        valid_agent_num = self._update_scenario_by_feature(features, self._N_agent)
 
         # Get reference path
         ref_path = self._get_reference_path(ego_state, traffic_light_data, observation)
@@ -309,14 +325,6 @@ class Planner(AbstractPlanner):
         # Infer prediction model
         with torch.no_grad():
             plan, predictions, scores, ego_state_transformed, neighbors_state_transformed = self._get_prediction(features)
-
-        # Trajectory refinement
-        with torch.no_grad():
-            plan = self._trajectory_planner.plan(ego_state, ego_state_transformed, neighbors_state_transformed, 
-                                                 predictions, plan, scores, ref_path, observation)
-            
-        states = transform_predictions_to_states(plan, history.ego_states, self._future_horizon, DT)
-        trajectory = InterpolatedTrajectory(states)
         
         _, N, _, _, _ = predictions.shape
         scores = scores.squeeze(0)  # 移除批次维度，变成 [N, M]
@@ -326,9 +334,36 @@ class Planner(AbstractPlanner):
         best_indices = torch.argmax(scores, dim=1)  # 维度 [N]
         agent_indices = torch.arange(N)  # 维度 [N]
 
-        best_trajectories = predictions[agent_indices, best_indices]  # 维度 [N, T, D]
+        best_predictions = predictions[agent_indices, best_indices].cpu().numpy()  # 维度 [N, T, D]
+        
+        state_args = dict()
+        state_args['position'] = np.array([ego_state.car_footprint.center.x, ego_state.car_footprint.center.y])
+        state_args['orientation'] = ego_state.car_footprint.center.heading
+        state_args['velocity'] = ego_state.dynamic_car_state.rear_axle_velocity_2d.x
+        state_args['acceleration'] = ego_state.dynamic_car_state.rear_axle_acceleration_2d.x
+        state_args['yaw_rate'] = ego_state.dynamic_car_state.angular_velocity
+        state_args['slip_angle'] = None
+        state_args['time_step'] = iteration
+        current_state = State(**state_args)
 
-        return trajectory, plan, best_trajectories.cpu().numpy(), ref_path
+        plan = self._confingency_planner.step(
+            scenario=self._scenario,
+            current_lanelet_id=0,
+            time_step=iteration,
+            ego_state=current_state,
+            prediction=copy.deepcopy(predictions[:valid_agent_num]),
+            ref_path=copy.deepcopy(ref_path[:,:2]),
+        )
+        
+        # Trajectory refinement
+        with torch.no_grad():
+            plan = self._trajectory_planner.plan(ego_state, ego_state_transformed, neighbors_state_transformed, 
+                                                 predictions, plan, scores, ref_path, observation)
+            
+        states = transform_predictions_to_states(plan, history.ego_states, self._future_horizon, DT)
+        trajectory = InterpolatedTrajectory(states)
+
+        return trajectory, plan, best_predictions
         # return trajectory, plan, predictions[0].reshape(-1, T, D).cpu().numpy()
     
     def compute_planner_trajectory(self, current_input: PlannerInput):
@@ -344,27 +379,8 @@ class Planner(AbstractPlanner):
             self._initialize_route_plan(self._scenario_manager.get_route_roadblock_ids())
             self._path_planner = LatticePlanner(self._candidate_lane_edge_ids, self._max_path_length)
             self._init_laneletnets(ego_state)
-        trajectory, plan, predictions, ref_path = self._plan(ego_state, history, traffic_light_data, observation)
-        
-        state_args = dict()
-        state_args['position'] = np.array([ego_state.car_footprint.center.x, ego_state.car_footprint.center.y])
-        state_args['orientation'] = ego_state.car_footprint.center.heading
-        state_args['velocity'] = ego_state.dynamic_car_state.rear_axle_velocity_2d.x
-        state_args['acceleration'] = ego_state.dynamic_car_state.rear_axle_acceleration_2d.x
-        state_args['yaw_rate'] = ego_state.dynamic_car_state.angular_velocity
-        # state_args['slip_angle'] = ego_state.dynamic_car_state.tire_steering_rate
-        state_args['slip_angle'] = None
-        state_args['time_step'] = current_input.iteration.index
-        current_state = State(**state_args)
-        self._confingency_planner.step(
-            scenario=self._scenario,
-            current_lanelet_id=0,
-            time_step=current_input.iteration.index,
-            ego_state=current_state,
-            prediction=copy.deepcopy(predictions[:self._N_agent]),
-            ref_path=copy.deepcopy(ref_path[:,:2]),
-        )
-        
+        trajectory, plan, predictions = self._plan(iteration, ego_state, history, traffic_light_data, observation)
+
         self._render = False
         
         if self._render:
