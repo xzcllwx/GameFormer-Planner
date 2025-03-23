@@ -3,3 +3,6 @@
 testing_log/
 training_log/
 *.png
+iLQR/
+planner/Frenet/
+.vscode/

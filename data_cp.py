@@ -182,22 +182,22 @@ def delete_random_files(dir_path, num_files=3000000, dry_run=True, record_file=N
 
 
 if __name__ == "__main__":
-    src_dir = "/root/data/alstar/womd/scenario/training_process"  # 替换为源文件夹路径
-    dst_dir = "/root/xzcllwx_ws/womd_process/womd_1M"  # 替换为目标文件夹路径
+    src_dir = "/root/data/alstar/womd/scenario/validation_process"  # 替换为源文件夹路径
+    dst_dir = "/root/xzcllwx_ws/womd_process/val_40K"  # 替换为目标文件夹路径
     record_file = "/root/xzcllwx_ws/womd_process/womd_1M.txt"  # 替换为记录文件路径
-    # womd_record_file = "/root/xzcllwx_ws/womd_process/womd_val_10K.txt"  # 替换为记录文件路径
+    womd_record_file = "/root/xzcllwx_ws/womd_process/womd_val_40K.txt"  # 替换为记录文件路径
     remain_file = "/root/xzcllwx_ws/womd_process/womd_3M.txt"  # 替换为记录文件路径
 
     # copy_and_record_files(src_dir, dst_dir, record_file)
 
-    copy_remaining_files(src_dir, dst_dir, record_file, remain_file)
+    # copy_remaining_files(src_dir, dst_dir, record_file, remain_file)
 
     # count, common = compare_text_files(record_file, remain_file)
     
-    # copy_random_files(src_dir, dst_dir, womd_record_file, num_files=100000)
+    # copy_random_files(src_dir, dst_dir, womd_record_file, num_files=400000)
     
-    # target_dir = "/root/xzcllwx_ws/nuplan_dataset_process/val_process"  # 替换为要删除文件的目录
-    # log_file = "/root/xzcllwx_ws/nuplan_dataset_process/delete_val_process.txt"  # 替换为日志文件路径
-    # delete_random_files(target_dir, num_files=300000, dry_run=False, record_file=log_file)
+    target_dir = "/root/xzcllwx_ws/womd_process/womd_1M"  # 替换为要删除文件的目录
+    log_file = "/root/xzcllwx_ws/womd_process/delete_womd_1M.txt"  # 替换为日志文件路径
+    delete_random_files(target_dir, num_files=3228499, dry_run=False, record_file=log_file)
 
     print("Done!")

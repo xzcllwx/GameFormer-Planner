@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.append(os.path.abspath('/root/xzcllwx_ws/GameFormer-Planner/iLQR/build/'))
+import motion_planning
 import math
 import time
 import matplotlib.pyplot as plt
@@ -12,9 +16,9 @@ from nuplan.planning.simulation.planner.abstract_planner import AbstractPlanner,
 from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
 from nuplan.planning.simulation.observation.idm.utils import path_to_linestring
 
-import sys
-import os
+
 import copy
+
 sys.path.append("/root/xzcllwx_ws")
 from pluto.src.utils.vis import *
 from pluto.src.feature_builders.nuplan_scenario_render import *
@@ -40,6 +44,8 @@ from commonroad.planning.planning_problem import PlanningProblemSet, PlanningPro
 from commonroad.scenario.obstacle import DynamicObstacle, ObstacleType
 from commonroad.common.util import Interval
 
+
+
 class Planner(AbstractPlanner):
     def __init__(self, model_path, device=None):
         self._max_path_length = MAX_LEN # [m]
@@ -60,7 +66,8 @@ class Planner(AbstractPlanner):
         
         self._render = False
         self._time = False
-        self._N_agent = 10
+        self._N_agent = 5
+        self._N_static_obstacle = 0
         # load settings from planning_fast.json
         settings_dict = load_planning_json("planning_fast.json")
         settings_dict["risk_dict"] = risk_dict = load_risk_json()
@@ -70,6 +77,7 @@ class Planner(AbstractPlanner):
         self.vehicle_params = VehicleParameters(settings_dict["evaluation_settings"]["vehicle_type"])
         self.exec_timer = ExecTimer(timing_enabled=settings_dict["evaluation_settings"]["timing_enabled"])
         self.frenet_settings = settings_dict["frenet_settings"]
+        self.config_path = '/root/xzcllwx_ws/GameFormer-Planner/iLQR/config/scenario_two_borrow.yaml'
         
     def name(self) -> str:
         return "GameFormer Planner"
@@ -83,7 +91,7 @@ class Planner(AbstractPlanner):
         self._goal = initialization.mission_goal # mission goal StateSE2
         self._route_roadblock_ids = initialization.route_roadblock_ids
         # self._initialize_route_plan(self._route_roadblock_ids)
-        self._initialize_model()
+        # self._initialize_model()
         self._confingency_planner = None
         self._trajectory_planner = TrajectoryPlanner()
         self._path_planner = None
@@ -93,6 +101,10 @@ class Planner(AbstractPlanner):
         self._save_dir = '/root/xzcllwx_ws/GameFormer-Planner/figure'
         if not os.path.exists(self._save_dir):
             os.makedirs(self._save_dir)
+
+        self._motion_planner = motion_planning.motion_planner(self.config_path)
+        
+        self._init_ref_path = False
 
     def _initialize_model(self):
         # The parameters of the model should be the same as the one used in training
@@ -143,6 +155,17 @@ class Planner(AbstractPlanner):
                 initial_state=init_state,
             )
             self._scenario.add_objects(agent_obstacle)
+            
+            
+        for i in range(self._N_agent+1, self._N_agent + self._N_static_obstacle):
+            obstacle_shape = Rectangle(width=2, length=2)
+            obstacle = DynamicObstacle(
+                obstacle_id=i,
+                obstacle_type=ObstacleType.PARKED_VEHICLE,
+                obstacle_shape=obstacle_shape,
+                initial_state=init_state,
+            )
+            self._scenario.add_objects(obstacle)
     
     def _init_laneletnets(self, initial_state):
         self._scenario = Scenario(
@@ -298,20 +321,73 @@ class Planner(AbstractPlanner):
 
         return plan, final_predictions, final_scores, ego_current, neighbors_current
     
+    def _get_constant_speed_prediction(self, features):
+        agents = features['neighbor_agents_past'][0]
+        N = len(agents)
+        T = self._N_points
+        device = agents.device
+        feature_dim = 5  # 获取特征维度
+        
+        last_states = agents[:, -1, :]
+        # The last dimension is the agent pose (x, y, heading) velocities (vx, vy, yaw rate) and size (length, width) at time t.
+        pos = last_states[:, :2]
+        heading = last_states[:, 2]
+        speed = torch.norm(last_states[:, 3:5], dim=1, keepdim=True)  # [N, 1]
+
+        dt = torch.tensor(DT, device=device)
+        time_step = torch.arange(1, T + 1, device=device).float() * dt
+        time_steps = time_step.view(1, T, 1).expand(N, T, 1)  # [N, T, 1]
+
+        cos_h = torch.cos(heading).unsqueeze(1)  # [N, 1]
+        sin_h = torch.sin(heading).unsqueeze(1)  # [N, 1]
+
+        speed_x = speed * cos_h 
+        speed_y = speed * sin_h
+        speed_x_expand = speed_x.unsqueeze(1).expand(N, T, 1)  # [N, T, 1]
+        speed_y_expand = speed_y.unsqueeze(1).expand(N, T, 1)  # [N, T, 1]
+        future_x = pos[:, 0].unsqueeze(1) + (speed_x_expand * time_steps).squeeze(-1)  # [N, T, 1]
+        future_y = pos[:, 1].unsqueeze(1) + (speed_y_expand * time_steps).squeeze(-1)  # [N, T, 1]
+        future_x.unsqueeze_(-1)
+        future_y.unsqueeze_(-1)
+        future_pos = torch.cat([future_x, future_y], dim=2)  # [N, T, 2]
+
+        predictions = torch.zeros(1, N, T, feature_dim, device=device)  # [1, N, T, D]
+
+        predictions[0, :, :, :2] = future_pos
+        predictions[0, :, :, 2:4] = 1  # cov
+        predictions[0, :, :, 4] = 0.1  # rho
+
+        predictions.unsqueeze_(2)  # Add a modality dimension, shape becomes [1, N, T, D]
+        valid_mask = ~torch.eq(last_states.sum(-1), 0).unsqueeze(1).unsqueeze(2).unsqueeze(2)  # [N, 1, 1]
+        predictions[0] = predictions[0] * valid_mask  # Automatically broadcast to all time steps
+        
+        scores = torch.ones(1, N, 1, 1, device=device)
+        scores[0] = scores[0] * valid_mask.squeeze(-1)
+        scores.squeeze_(-1)
+        
+        return predictions, scores  
+    
     def _update_scenario_by_feature(self, features, N_agent):
         for i in range(N_agent):
             agent = features['neighbor_agents_past'][0][i]
             if torch.eq(agent[-1].sum(-1), 0):
                 return i
-            length = agent[-1][6]
-            width = agent[-1][7]
-            object = self.__scenario.obstacle_by_id(i+1)
+            length = agent[-1][6].cpu().item()
+            width = agent[-1][7].cpu().item()
+            object = self._scenario.obstacle_by_id(i+1)
             obstacle_shape = Rectangle(width=width, length=length)
             if object is not None:
                 object.obstacle_shape = obstacle_shape
         return N_agent
     
     def _plan(self, iteration, ego_state, history, traffic_light_data, observation):
+        
+        rotation = ego_state.car_footprint.center.heading
+        translation = np.array([ego_state.car_footprint.center.x, ego_state.car_footprint.center.y]).reshape(1, 2)
+        rot_mat = np.array(
+            [[np.cos(rotation), -np.sin(rotation)], [np.sin(rotation), np.cos(rotation)]]
+        )
+        
         # Construct input features
         # 转换到了ego坐标系下
         features = observation_adapter(history, traffic_light_data, self._map_api, self._route_roadblock_ids, self._device) 
@@ -321,49 +397,125 @@ class Planner(AbstractPlanner):
 
         # Get reference path
         ref_path = self._get_reference_path(ego_state, traffic_light_data, observation)
+        
+        if not self._init_ref_path:
+            self._init_ref_path = True
+            # Transform reference path
+            global_path = ref_path[:,:2]
+            global_path = np.matmul(global_path, rot_mat.T)
+            global_path = global_path + translation
+            self._confingency_planner.init_global_path(global_path)
+            global_path_2 = np.transpose(global_path, (1, 0)) 
+            if self._motion_planner.set_reference_line(global_path_2.astype(np.float64)):
+                print("Set reference line successfully!")
+            else:
+                print("Set reference line failed!")
 
         # Infer prediction model
         with torch.no_grad():
-            plan, predictions, scores, ego_state_transformed, neighbors_state_transformed = self._get_prediction(features)
-        
-        _, N, _, _, _ = predictions.shape
-        scores = scores.squeeze(0)  # 移除批次维度，变成 [N, M]
-        scores =  scores[1:, :]  # 移除第一个agent的预测
-        predictions = predictions.squeeze(0)  # 移除批次维度，变成 [N, M, T, D]
-        
-        best_indices = torch.argmax(scores, dim=1)  # 维度 [N]
-        agent_indices = torch.arange(N)  # 维度 [N]
+            # plan, predictions, scores, ego_state_transformed, neighbors_state_transformed = self._get_prediction(features)
+            predictions, scores = self._get_constant_speed_prediction(features)
+            
+        with torch.no_grad():  
+            _, N, _, _, _ = predictions.shape
+            scores = scores.squeeze(0)  # 移除批次维度，变成 [N, M]
+            # scores =  scores[1:, :]  # 移除第一个agent的预测 → 对于预测模型，需要确认
+            predictions = predictions.squeeze(0)  # 移除批次维度，变成 [N, M, T, D]
+            
+            best_indices = torch.argmax(scores, dim=1)  # 维度 [N]
+            agent_indices = torch.arange(N)  # 维度 [N]
 
-        best_predictions = predictions[agent_indices, best_indices].cpu().numpy()  # 维度 [N, T, D]
-        
-        state_args = dict()
-        state_args['position'] = np.array([ego_state.car_footprint.center.x, ego_state.car_footprint.center.y])
-        state_args['orientation'] = ego_state.car_footprint.center.heading
-        state_args['velocity'] = ego_state.dynamic_car_state.rear_axle_velocity_2d.x
-        state_args['acceleration'] = ego_state.dynamic_car_state.rear_axle_acceleration_2d.x
-        state_args['yaw_rate'] = ego_state.dynamic_car_state.angular_velocity
-        state_args['slip_angle'] = None
-        state_args['time_step'] = iteration
-        current_state = State(**state_args)
+            best_predictions = predictions[agent_indices, best_indices]  # 维度 [N, T, D]
+            
+            output_predictions = best_predictions.cpu().numpy()
+            
+            # Transform positions
+            trans_tensor = torch.tensor(translation, device=predictions.device, dtype=torch.float32).reshape(1, 2)
+            rot_mat_tensor = torch.tensor(rot_mat, device=predictions.device, dtype=torch.float32).reshape(2, 2)
+            best_predictions[:, :, :2] = torch.matmul(best_predictions[:, :, :2], rot_mat_tensor.T)
+            best_predictions[:, :, :2] = best_predictions[:, :, :2] + trans_tensor
+            
+            # Extract sigma_x, sigma_y, and rho
+            sigma_x = best_predictions[:, :,2]
+            sigma_y = best_predictions[:, :,3]
+            rho = best_predictions[:,:, 4]
 
-        plan = self._confingency_planner.step(
-            scenario=self._scenario,
-            current_lanelet_id=0,
-            time_step=iteration,
-            ego_state=current_state,
-            prediction=copy.deepcopy(predictions[:valid_agent_num]),
-            ref_path=copy.deepcopy(ref_path[:,:2]),
-        )
+            # Compute covariance matrices
+            cov_matrices = torch.zeros((best_predictions.shape[0], best_predictions.shape[1],  2,  2), device=predictions.device, dtype=torch.float32)
+            cov_matrices[:, :, 0, 0] = sigma_x ** 2
+            cov_matrices[:, :, 1, 1] = sigma_y ** 2
+            cov_matrices[:, : ,0, 1] = rho * sigma_x * sigma_y #需要对换位置，由于数值一样，无所谓
+            cov_matrices[:, : ,1, 0] = rho * sigma_x * sigma_y
+
+            # Apply rotation to covariance matrices
+            cov_matrices = torch.matmul(rot_mat_tensor, torch.matmul(cov_matrices, rot_mat_tensor.T))
+            
+            state_args = dict()
+            state_args['position'] = np.array([ego_state.car_footprint.center.x, ego_state.car_footprint.center.y])
+            state_args['orientation'] = ego_state.car_footprint.center.heading
+            state_args['velocity'] = ego_state.dynamic_car_state.rear_axle_velocity_2d.x
+            state_args['acceleration'] = ego_state.dynamic_car_state.rear_axle_acceleration_2d.x
+            state_args['yaw_rate'] = ego_state.dynamic_car_state.angular_velocity
+            state_args['slip_angle'] = None
+            state_args['time_step'] = iteration
+            current_state = State(**state_args)
+            
+            global_predictions = best_predictions[:valid_agent_num, :, :2].cpu().numpy()
+            # Calculate yaw for each agent's trajectory
+            yaw = np.zeros_like(global_predictions[:, :, 0])
+            yaw[:, :-1] = np.arctan2(
+                np.diff(global_predictions[:, :, 1], axis=1),
+                np.diff(global_predictions[:, :, 0], axis=1)
+            )
+            yaw[:, -1] = yaw[:, -2]
+            yaw = yaw[:, :, np.newaxis]  # Add a new axis for yaw
+            global_predictions = np.concatenate([global_predictions, yaw], axis=2)  # [N, T, D], where D includes x, y, yaw
+            global_predictions = np.transpose(global_predictions, (0, 2, 1))  # [N, D, T]
+            
+            cov = cov_matrices[:valid_agent_num].cpu().numpy()
+            plan = self._confingency_planner.step(
+                scenario=self._scenario,
+                current_lanelet_id=0,
+                time_step=iteration,
+                ego_state=current_state,
+                predictions=global_predictions,
+                cov=cov,
+            )
+            
+            initial_condition = [ego_state.car_footprint.center.x, 
+                                ego_state.car_footprint.center.y,
+                                ego_state.dynamic_car_state.rear_axle_velocity_2d.x, 
+                                ego_state.car_footprint.center.heading
+                                ]
+            # init_traj = [[float(s[0]), float(s[1]), float(s[2]), float(s[3])] for s in plan]
+            # global_predictions_2 = []
+            # for global_predition in global_predictions:
+            #     x = global_predition[:, 0]
+            #     y = global_predition[:, 1]
+            #     yaw = [math.atan2(y[i+1] - y[i], x[i+1] - x[i]) if i < len(x) - 1 else 0.0 for i in range(len(x))]
+            #     yaw[-1] = yaw[-2]
+            #     pred = [x, y, yaw]
+            #     global_predictions_2.append(pred)
+            
+            new_plan = self._motion_planner.plan(
+                initial_condition, 
+                plan.astype(np.float64), 
+                global_predictions.astype(np.float64))
+        
+            plan = np.array(new_plan)
+        
+            plan = LatticePlanner.transform_to_ego_frame(plan, ego_state)
+            
         
         # Trajectory refinement
-        with torch.no_grad():
-            plan = self._trajectory_planner.plan(ego_state, ego_state_transformed, neighbors_state_transformed, 
-                                                 predictions, plan, scores, ref_path, observation)
+        # with torch.no_grad():
+        #     plan = self._trajectory_planner.plan(ego_state, ego_state_transformed, neighbors_state_transformed, 
+        #                                          predictions, plan, scores, ref_path, observation)
             
-        states = transform_predictions_to_states(plan, history.ego_states, self._future_horizon, DT)
+        states = transform_predictions_to_states(plan[:,:3], history.ego_states, self._future_horizon, DT)
         trajectory = InterpolatedTrajectory(states)
 
-        return trajectory, plan, best_predictions
+        return trajectory, plan, output_predictions
         # return trajectory, plan, predictions[0].reshape(-1, T, D).cpu().numpy()
     
     def compute_planner_trajectory(self, current_input: PlannerInput):
