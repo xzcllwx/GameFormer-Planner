@@ -6,3 +6,5 @@ training_log/
 iLQR/
 planner/Frenet/
 .vscode/
+*.mp4
+*.yaml
