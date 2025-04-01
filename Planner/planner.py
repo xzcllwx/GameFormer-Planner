@@ -1,12 +1,13 @@
 import sys
 import os
-sys.path.append(os.path.abspath('/root/xzcllwx_ws/GameFormer-Planner/iLQR/build/'))
-import motion_planning
+sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
 import math
 import time
 import matplotlib.pyplot as plt
-from shapely import Point, LineString
+from shapely.geometry import Point, LineString
+from shapely.geometry.base import CAP_STYLE
 from .planner_utils import *
+from .smoother import MotionNonlinearSmoother
 from .observation import *
 from GameFormer.predictor import GameFormer
 from .state_lattice_path_planner import LatticePlanner
@@ -18,7 +19,8 @@ from nuplan.planning.simulation.observation.idm.utils import path_to_linestring
 
 
 import copy
-
+sys.path.append(os.path.abspath('/root/xzcllwx_ws/GameFormer-Planner/iLQR/build/'))
+import motion_planning
 sys.path.append("/root/xzcllwx_ws")
 from pluto.src.utils.vis import *
 from pluto.src.feature_builders.nuplan_scenario_render import *
@@ -43,6 +45,8 @@ from commonroad.planning.goal import GoalRegion
 from commonroad.planning.planning_problem import PlanningProblemSet, PlanningProblem
 from commonroad.scenario.obstacle import DynamicObstacle, ObstacleType
 from commonroad.common.util import Interval
+from commonroad_helper_functions.utils.cubicspline import CubicSpline2D
+
 
 
 
@@ -78,6 +82,12 @@ class Planner(AbstractPlanner):
         self.exec_timer = ExecTimer(timing_enabled=settings_dict["evaluation_settings"]["timing_enabled"])
         self.frenet_settings = settings_dict["frenet_settings"]
         self.config_path = '/root/xzcllwx_ws/GameFormer-Planner/iLQR/config/scenario_two_borrow.yaml'
+        self.csv_save_dir = '/root/xzcllwx_ws/GameFormer-Planner/csv'
+
+        self.s_positive_threhold = 5
+        self.s_negative_threhold = -10
+        self.d_threhold = 5
+        
         
     def name(self) -> str:
         return "GameFormer Planner"
@@ -104,7 +114,28 @@ class Planner(AbstractPlanner):
 
         self._motion_planner = motion_planning.motion_planner(self.config_path)
         
-        self._init_ref_path = False
+        self._global_plan = None
+        
+        self._reference_spline = None
+        self._target_speed = 13.0
+        
+        self._last_track_target = None
+        self._last_belief = {"leader": [], "follower": [], "begin_iteration": 0, "history_x": [], "history_y": [], "branch_time": []}
+        self._last_pred = {"leader": None, "follower": None}
+        self._smoother = MotionNonlinearSmoother(trajectory_len=T*10-1, dt=DT)
+        self.frame_data = {}
+        self.save_data = True
+        self._ego_state = {
+            "x": [],
+            "y": [],
+            "heading": [],
+            "velocity": [],
+            "acceleration": [],
+            "yaw_rate": [],
+            "steer_angle": [],
+            "steering_rate": [],            
+        }
+
 
     def _initialize_model(self):
         # The parameters of the model should be the same as the one used in training
@@ -254,6 +285,7 @@ class Planner(AbstractPlanner):
                 mode=self.frenet_settings["mode"],
                 frenet_parameters=self.frenet_settings["frenet_parameters"],
                 settings=self.settings,
+                plot_frenet_trajectories=True,
             )
 
     def _get_reference_path(self, ego_state, traffic_light_data, observation):
@@ -280,7 +312,7 @@ class Planner(AbstractPlanner):
 
         # Get reference path, handle exception
         try:
-            ref_path = self._path_planner.plan(ego_state, starting_block, observation, traffic_light_data)
+            ref_path, optimal_origin_path = self._path_planner.plan(ego_state, starting_block, observation, traffic_light_data)
         except:
             ref_path = None
 
@@ -288,27 +320,60 @@ class Planner(AbstractPlanner):
             return None
 
         # Annotate red light to occupancy
-        occupancy = np.zeros(shape=(ref_path.shape[0], 1))
-        for data in traffic_light_data:
-            id_ = str(data.lane_connector_id)
-            if data.status == TrafficLightStatusType.RED and id_ in self._candidate_lane_edge_ids:
-                lane_conn = self._map_api.get_map_object(id_, SemanticMapLayer.LANE_CONNECTOR)
-                conn_path = lane_conn.baseline_path.discrete_path
-                conn_path = np.array([[p.x, p.y] for p in conn_path])
-                red_light_lane = transform_to_ego_frame(conn_path, ego_state)
-                occupancy = annotate_occupancy(occupancy, ref_path, red_light_lane)
+        # occupancy = np.zeros(shape=(ref_path.shape[0], 1))
+        # for data in traffic_light_data:
+        #     id_ = str(data.lane_connector_id)
+        #     if data.status == TrafficLightStatusType.RED and id_ in self._candidate_lane_edge_ids:
+        #         lane_conn = self._map_api.get_map_object(id_, SemanticMapLayer.LANE_CONNECTOR)
+        #         conn_path = lane_conn.baseline_path.discrete_path
+        #         conn_path = np.array([[p.x, p.y] for p in conn_path])
+        #         red_light_lane = transform_to_ego_frame(conn_path, ego_state)
+        #         occupancy = annotate_occupancy(occupancy, ref_path, red_light_lane)
 
         # Annotate max speed along the reference path
         target_speed = starting_block.interior_edges[0].speed_limit_mps or self._target_speed
         target_speed = np.clip(target_speed, min_target_speed, max_target_speed)
-        max_speed = annotate_speed(ref_path, target_speed)
+        # max_speed = annotate_speed(ref_path, target_speed)
 
         # Finalize reference path
-        ref_path = np.concatenate([ref_path, max_speed, occupancy], axis=-1) # [x, y, theta, k, v_max, occupancy]
+        # ref_path = np.concatenate([ref_path, max_speed, occupancy], axis=-1) # [x, y, theta, k, v_max, occupancy]
+        # if len(ref_path) < MAX_LEN * 10:
+        #     ref_path = np.append(ref_path, np.repeat(ref_path[np.newaxis, -1], MAX_LEN*10-len(ref_path), axis=0), axis=0)
+        ref_path = ref_path[:, :2]
+        # plt.plot(ref_path[:, 0].copy(), ref_path[:, 1].copy(), 'r')
+        # plt.show()
         if len(ref_path) < MAX_LEN * 10:
-            ref_path = np.append(ref_path, np.repeat(ref_path[np.newaxis, -1], MAX_LEN*10-len(ref_path), axis=0), axis=0)
+            extend_len = int(MAX_LEN * 10 - len(ref_path))
+            extend_point_num = int(extend_len / 0.1 )
+            last_point = ref_path[-1]
+            if len(ref_path) >= 5:
+                direction = ref_path[-1, :2] - ref_path[-5, :2]  # 计算方向向量
+                # 沿着该方向添加新点
+                direction = direction / np.linalg.norm(direction)  # Normalize the direction vector
+                extended_points = np.array([last_point + direction * (i+1) * 0.1
+                                        for i in range(extend_point_num)])
+            else:
+                # 只有一个点时无法确定方向，只能重复
+                extended_points = np.repeat(last_point[np.newaxis, :], MAX_LEN*10-len(ref_path), axis=0)
+            ref_path = np.append(ref_path, extended_points, axis=0)
         
-        return ref_path.astype(np.float32)
+        extend_len = REVERSE_EXTEND_LEN
+        extend_point_num = int(extend_len / 0.1) 
+        first = ref_path[0]
+        if len(ref_path) >= 1:
+            direction = ref_path[0, :2] - ref_path[1, :2]  # Use the direction between the first two points
+            direction = direction / np.linalg.norm(direction)  # Normalize the direction vector
+            extended_points = np.array([first + direction * (i + 1) * 0.1
+                        for i in range(extend_point_num)])
+        else:
+            extended_points = np.repeat(first[np.newaxis, :], extend_point_num, axis=0)
+        extended_points = extended_points[::-1]
+        ref_path = np.append(extended_points, ref_path, axis=0)
+        
+        # plt.plot(ref_path[:, 0], ref_path[:, 1], 'b')
+        # plt.axis('equal')
+        # plt.show()
+        return ref_path.astype(np.float32), target_speed, optimal_origin_path
 
     def _get_prediction(self, features):
         predictions, plan = self._model(features)
@@ -387,30 +452,48 @@ class Planner(AbstractPlanner):
         rot_mat = np.array(
             [[np.cos(rotation), -np.sin(rotation)], [np.sin(rotation), np.cos(rotation)]]
         )
+        if self.save_data:
+            self.frame_data = {}
+            self.frame_data['iteration'] = iteration
+            self.frame_data['timestamp'] = iteration * DT
         
         # Construct input features
         # 转换到了ego坐标系下
-        features = observation_adapter(history, traffic_light_data, self._map_api, self._route_roadblock_ids, self._device) 
+        features, track_ids = observation_adapter(history, traffic_light_data, self._map_api, self._route_roadblock_ids, self._device) 
 
         # update the scenario by feature
         valid_agent_num = self._update_scenario_by_feature(features, self._N_agent)
 
         # Get reference path
-        ref_path = self._get_reference_path(ego_state, traffic_light_data, observation)
-        
-        if not self._init_ref_path:
-            self._init_ref_path = True
+    
+        if self._reference_spline is None:
+            print("init reference path")
+            ref_path, target_speed, optimal_origin_path = self._get_reference_path(ego_state, traffic_light_data, observation)
+            self._target_speed = target_speed
             # Transform reference path
             global_path = ref_path[:,:2]
             global_path = np.matmul(global_path, rot_mat.T)
             global_path = global_path + translation
+            # Downsample global_path to 1m intervals
+            downsampled_indices = np.arange(0, len(global_path), 10)
+            global_path = global_path[downsampled_indices]
+            self._reference_spline = CubicSpline2D(x=global_path[:, 0], y=global_path[:, 1])
             self._confingency_planner.init_global_path(global_path)
-            global_path_2 = np.transpose(global_path, (1, 0)) 
+            if self.save_data:
+                self.frame_data['global_path_x'] = global_path[:, 0].tolist()
+                self.frame_data['global_path_y'] = global_path[:, 1].tolist()
+            # index = np.arange(0, len(optimal_origin_path), 4)
+            # optimal_origin_path = optimal_origin_path[index]
+            # global_path_2 = np.transpose(optimal_origin_path, (1, 0))
+            global_path_2 = np.transpose(global_path, (1, 0))
             if self._motion_planner.set_reference_line(global_path_2.astype(np.float64)):
                 print("Set reference line successfully!")
             else:
                 print("Set reference line failed!")
 
+        target_speed = self._target_speed
+        if self.save_data:
+            self.frame_data['target_speed'] = target_speed
         # Infer prediction model
         with torch.no_grad():
             # plan, predictions, scores, ego_state_transformed, neighbors_state_transformed = self._get_prediction(features)
@@ -426,6 +509,15 @@ class Planner(AbstractPlanner):
             agent_indices = torch.arange(N)  # 维度 [N]
 
             best_predictions = predictions[agent_indices, best_indices]  # 维度 [N, T, D]
+            agent_current = features['neighbor_agents_past'][0][:N, -1, :]
+            current_positions = agent_current[:, :2].unsqueeze(1)  # Extract current positions and add time dimension
+            current_sigma_x = torch.full((N, 1), 0.001, device=best_predictions.device)  # sigma_x
+            current_sigma_y = torch.full((N, 1), 0.001, device=best_predictions.device)  # sigma_y
+            current_rho = torch.full((N, 1), 0.0, device=best_predictions.device)  # rho
+            current_covariances = torch.cat([current_sigma_x, current_sigma_y, current_rho], dim=1).unsqueeze(1)  # Add time dimension
+
+            # Concatenate current positions and covariances to the beginning of best_predictions
+            best_predictions = torch.cat([torch.cat([current_positions, current_covariances], dim=2), best_predictions], dim=1)
             
             output_predictions = best_predictions.cpu().numpy()
             
@@ -453,14 +545,32 @@ class Planner(AbstractPlanner):
             state_args = dict()
             state_args['position'] = np.array([ego_state.car_footprint.center.x, ego_state.car_footprint.center.y])
             state_args['orientation'] = ego_state.car_footprint.center.heading
-            state_args['velocity'] = ego_state.dynamic_car_state.rear_axle_velocity_2d.x
-            state_args['acceleration'] = ego_state.dynamic_car_state.rear_axle_acceleration_2d.x
+            state_args['velocity'] = np.sqrt(ego_state.dynamic_car_state.rear_axle_velocity_2d.x**2 + ego_state.dynamic_car_state.rear_axle_velocity_2d.y**2)
+            state_args['acceleration'] = np.sqrt(ego_state.dynamic_car_state.rear_axle_acceleration_2d.x**2 + ego_state.dynamic_car_state.rear_axle_acceleration_2d.y**2)
             state_args['yaw_rate'] = ego_state.dynamic_car_state.angular_velocity
             state_args['slip_angle'] = None
             state_args['time_step'] = iteration
             current_state = State(**state_args)
+            if self.save_data:
+                self._ego_state['x'].append(ego_state.car_footprint.center.x)
+                self.frame_data['ego_x'] = self._ego_state['x']
+                self._ego_state['y'].append(ego_state.car_footprint.center.y)
+                self.frame_data['ego_y'] = self._ego_state['y']
+                self._ego_state['heading'].append(ego_state.car_footprint.center.heading)
+                self.frame_data['ego_heading'] = self._ego_state['heading']
+                self._ego_state['velocity'].append(np.sqrt(ego_state.dynamic_car_state.rear_axle_velocity_2d.x**2 + ego_state.dynamic_car_state.rear_axle_velocity_2d.y**2))
+                self.frame_data['ego_velocity'] = self._ego_state['velocity']
+                self._ego_state['acceleration'].append(np.sqrt(ego_state.dynamic_car_state.rear_axle_acceleration_2d.x**2 + ego_state.dynamic_car_state.rear_axle_acceleration_2d.y**2))
+                self.frame_data['ego_acceleration'] = self._ego_state['acceleration']
+                self._ego_state['yaw_rate'].append(ego_state.dynamic_car_state.angular_velocity)
+                self.frame_data['ego_yaw_rate'] = self._ego_state['yaw_rate']
+                self._ego_state['steer_angle'].append(ego_state.tire_steering_angle)
+                self.frame_data['ego_steer_angle'] = self._ego_state['steer_angle']
+                self.frame_data['ego_steering_rate'] = ego_state.dynamic_car_state.tire_steering_rate
+                self.frame_data['ego_width'] = ego_state.car_footprint.width
+                self.frame_data['ego_length'] = ego_state.car_footprint.length
             
-            global_predictions = best_predictions[:valid_agent_num, :, :2].cpu().numpy()
+            global_predictions = best_predictions[:, :, :2].cpu().numpy()
             # Calculate yaw for each agent's trajectory
             yaw = np.zeros_like(global_predictions[:, :, 0])
             yaw[:, :-1] = np.arctan2(
@@ -471,41 +581,296 @@ class Planner(AbstractPlanner):
             yaw = yaw[:, :, np.newaxis]  # Add a new axis for yaw
             global_predictions = np.concatenate([global_predictions, yaw], axis=2)  # [N, T, D], where D includes x, y, yaw
             global_predictions = np.transpose(global_predictions, (0, 2, 1))  # [N, D, T]
+            cov = cov_matrices[:].cpu().numpy()
+            ego_s, _ = self._reference_spline.get_min_arc_length([current_state.position[0], current_state.position[1]])
+            ego_yaw = current_state.orientation
+            target_index = []
+            d_square_threshold = (1.5*3.4)**2
+            for i, pred in enumerate(global_predictions):
+                if i >= len(track_ids):
+                    break
+                position = np.array([pred[0, 0], pred[1, 0]])
+                agent_v = np.array([pred[0, 1] - pred[0, 0], pred[1, 1] - pred[1, 0]]) / DT
+                agent_v_norm = np.linalg.norm(agent_v)
+                agent_yaw = pred[2, 0]
+                diff_yaw = angle_sub(ego_yaw, agent_yaw)
+                if agent_v_norm > 5 and np.abs(diff_yaw) > np.pi / 2:
+                    continue
+                current_s, current_d_square = self._reference_spline.get_min_arc_length([position[0], position[1]])
+                if current_s-ego_s < -50 or \
+                    current_s-ego_s > 60 or \
+                    current_d_square > d_square_threshold:
+                    continue
+                target_index.append(i)
+
+            print(f'target index num: {len(target_index)}')
+
+            if len(target_index) == 0:
+                target_index = [0]
+            if len(target_index) <= valid_agent_num:
+                global_predictions = global_predictions[target_index]
+                cov = cov[target_index]
+                track_ids = [track_ids[i] for i in target_index]
+            else:
+                global_predictions = global_predictions[target_index[:valid_agent_num]]
+                cov = cov[target_index[:valid_agent_num]]
+                track_ids = [track_ids[i] for i in target_index[:valid_agent_num]]
+                
+            print(f'pred agent num: {global_predictions.shape[0]}')
+            print(f'track agent num: {len(track_ids)}')
             
-            cov = cov_matrices[:valid_agent_num].cpu().numpy()
-            plan = self._confingency_planner.step(
+            if global_predictions.shape[0] == 0:
+                global_predictions = np.zeros((1, 3, self._N_points + 1))
+                cov = np.zeros((1, self._N_points + 1, 2, 2))
+                for i in range(self._N_points + 1):
+                    cov[0, i, 0, 0] = 0.01
+                    cov[0, i, 1, 1] = 0.01
+
+            track_dict = dict()
+            for i, track_id in enumerate(track_ids):
+                track_dict[track_id] = i+1
+
+            global_predictions = global_predictions[:, np.newaxis, :, :]  # Add a modality axis after N
+            cov = cov[:, np.newaxis, :, :, :]  # Add a modality axis after N
+
+            # 博弈预测
+            belief = [1]
+            l_pred_x = None
+            l_pred_y = None
+            f_pred_x = None
+            f_pred_y = None
+            if self._global_plan is not None:
+                line1 = LineString(self._global_plan[:, :2]).buffer((WIDTH/2), cap_style=CAP_STYLE.square)
+                for i in range(len(global_predictions)):
+                    agent_prediction = global_predictions[i][0] # [D, T]
+                    position = np.array([agent_prediction[0, 0], agent_prediction[1, 0]])
+                    v = np.array([agent_prediction[0, 1] - agent_prediction[0, 0], agent_prediction[1, 1] - agent_prediction[1, 0]]) / DT
+                    v_norm = np.linalg.norm(v)
+                    if v_norm < 1:
+                        print(f'Agent {i+1} is too slow')
+                        continue
+                    current_s, current_d_square = self._reference_spline.get_min_arc_length([position[0], position[1]])
+                    if current_s-ego_s < self.s_negative_threhold or \
+                        current_s-ego_s > self.s_positive_threhold or \
+                        math.sqrt(current_d_square) > self.d_threhold:
+                        print(f'Agent {i+1} is out of range')
+                        print(f'current_s-ego_s: {current_s-ego_s}')
+                        print(f'current_d_square: {current_d_square}')
+                        continue
+                    line2 = LineString(agent_prediction[:2].T).buffer((WIDTH/2), cap_style=CAP_STYLE.square)
+                    is_intersect = line1.intersects(line2)
+                    if is_intersect:
+                        # global_predictions模态轴复制
+                        global_predictions = global_predictions.repeat(2, axis=1)
+                        cov = cov.repeat(2, axis=1)
+                        agent_prediction = global_predictions[i][0] # [D, T]
+                        intersection_polygon = line1.intersection(line2)
+                        agent_collsion_t, _ = find_intersection_indices(agent_prediction, intersection_polygon)
+                        ego_collsion_t, _ = find_intersection_indices(self._global_plan, intersection_polygon)
+                        ego_v = np.array([current_state.velocity*np.cos(current_state.orientation), current_state.velocity*np.sin(current_state.orientation)])
+                        
+                        intersection_points = np.array([agent_prediction[0, agent_collsion_t], agent_prediction[1, agent_collsion_t]])
+                        tangent_vector = np.array([intersection_points[0]-agent_prediction[0, 0], intersection_points[1]-agent_prediction[1, 0]])
+                        tangent_vector = tangent_vector / np.linalg.norm(tangent_vector)
+                        print(f'Agent {i+1} is intersecting with global plan and track token is {track_ids[i]}')
+                        if self._last_track_target is not None and track_ids[i] == self._last_track_target:
+                            print(f'Agent {i+1} is the same as last track target')
+                            last_leader_pred = self._last_pred['leader']
+                            last_follower_pred = self._last_pred['follower']
+                            self._last_belief['history_x'].append(agent_prediction[0, 0])
+                            self._last_belief['history_y'].append(agent_prediction[1, 0])
+                            agent_v = np.array([self._last_belief['history_x'][-1] - self._last_belief['history_x'][-2], self._last_belief['history_y'][-1] - self._last_belief['history_y'][-2]]) / DT
+                            real_relative_v = np.dot(agent_v - ego_v, tangent_vector)
+                            print(f"real_relative_v: {real_relative_v}")
+                            ref_time = 5
+                            sigma_leader = 2.0
+                            sigma_follower = 2.0
+                            rho = 0.25
+                            # leader 
+                            pred_v = np.array([last_leader_pred[0, ref_time] - last_leader_pred[0, 0], last_leader_pred[1, ref_time] - last_leader_pred[1, 0]]) / (ref_time * DT)
+                            pred_relative_v = np.dot(pred_v - ego_v, tangent_vector)
+                            # diff = real_relative_v - pred_relative_v
+                            diff = real_relative_v - 1.0
+                            # 正太分布根据diff计算观测概率
+
+                            p_leader_ob = 1 / (np.sqrt(2 * np.pi) * sigma_leader) * np.exp(-(diff)**2 / (2 * sigma_leader**2)) 
+                            print(f"leader_pred_relative_v: {pred_relative_v}")
+                            print(f"leader_diff: {diff}")
+                            print(f"p_leader_ob: {p_leader_ob}")
+                            # follower
+                            pred_v = np.array([last_follower_pred[0, ref_time] - last_follower_pred[0, 0], last_follower_pred[1, ref_time] - last_follower_pred[1, 0]]) / (ref_time * DT)
+                            pred_relative_v = np.dot(pred_v - ego_v, tangent_vector)
+                            # diff = real_relative_v - pred_relative_v
+                            diff = real_relative_v - -1.0
+                            # 正太分布根据diff计算观测概率
+                            p_follower_ob = 1 / (np.sqrt(2 * np.pi) * sigma_follower) * np.exp(-(diff)**2 / (2 * sigma_follower**2))
+                            k_ob_l_f = p_follower_ob / (p_leader_ob + p_follower_ob)
+                            k_ob_f_l = p_leader_ob / (p_leader_ob + p_follower_ob)
+                            print(f"follower_pred_relative_v: {pred_relative_v}")
+                            print(f"follower_diff: {diff}")
+                            print(f"p_follower_ob: {p_follower_ob}")
+                            # calculate belief
+                            p_leader = p_leader_ob * self._last_belief['leader'][-1] + k_ob_f_l * self._last_belief['follower'][-1] * 1 / (np.sqrt(2 * np.pi) * sigma_follower) * rho
+                            p_follower = p_follower_ob * self._last_belief['follower'][-1] + k_ob_l_f * self._last_belief['leader'][-1] * 1 / (np.sqrt(2 * np.pi) * sigma_follower) * rho
+                            sum_p = p_leader + p_follower
+                            p_leader = p_leader / sum_p
+                            p_follower = p_follower / sum_p
+                            self._last_belief['leader'].append(p_leader)
+                            self._last_belief['follower'].append(p_follower)
+
+                        else:
+                            print(f'Agent {i+1} is different from last track target')
+                            self._last_track_target = track_ids[i]
+                            self._last_belief = {"leader": [0.5], "follower": [0.5], "begin_iteration": iteration, "history_x": [agent_prediction[0, 0]], "history_y": [agent_prediction[1, 0]], "branch_time": []}
+                            self._last_pred = {"leader": None, "follower": None}
+
+                        # predict leader by s-t graph
+                        agent_v = np.array([agent_prediction[0, 1] - agent_prediction[0, 0], agent_prediction[1, 1] - agent_prediction[1, 0]]) / DT
+                        if len(self._last_belief['history_x']) > 1:
+                            agent_v = np.array([self._last_belief['history_x'][-1] - self._last_belief['history_x'][-2], self._last_belief['history_y'][-1] - self._last_belief['history_y'][-2]]) / DT
+                        x = agent_prediction[0, :]
+                        y = agent_prediction[1, :]
+                        path = CubicSpline2D(x=x, y=y)
+                        # print(f"agent collsion t: {agent_collsion_t}")
+                        # print(f"ego collsion t: {ego_collsion_t}")
+                        # leader
+                        target_t_ind = min(agent_collsion_t, ego_collsion_t)
+                        l_pred_x, l_pred_y = LF_constant_prediction(True, agent_v, target_t_ind, path, target_speed, agent_prediction, T, DT, agent_collsion_t)
+                        # follower
+                        target_t_ind = max(agent_collsion_t, ego_collsion_t)
+                        f_pred_x, f_pred_y = LF_constant_prediction(False, agent_v, target_t_ind, path, target_speed, agent_prediction, T, DT, agent_collsion_t)
+                        # replace
+                        global_predictions[i][0][0, 1:] = l_pred_x
+                        global_predictions[i][0][1, 1:] = l_pred_y
+                        self._last_pred['leader'] = copy.deepcopy(global_predictions[i][0][:2, :])
+                        global_predictions[i][1][0, 1:] = f_pred_x
+                        global_predictions[i][1][1, 1:] = f_pred_y
+                        self._last_pred['follower'] = copy.deepcopy(global_predictions[i][1][:2, :])
+                        belief = [self._last_belief['leader'][-1], self._last_belief['follower'][-1]]
+                        track_dict[track_ids[i]] = -1
+                        plt.cla()
+                        t = np.arange(self._last_belief["begin_iteration"], iteration+1)
+                        plt.plot(t, self._last_belief['leader'], 'r-')
+                        plt.plot(t, self._last_belief['follower'], 'g--')
+                        plt.xlabel('iteration')
+                        plt.ylabel('belief')
+                        plt.title('belief')
+                        plt.legend(['leader', 'follower'])
+                        save_belief_path = "/root/xzcllwx_ws/GameFormer-Planner/belief"
+                        plt.savefig(os.path.join(save_belief_path, f'{iteration}.png'))
+                        self._last_belief["branch_time"].append(calcualte_branch_time(self._last_belief['leader'][-1], 
+                                                            self._last_pred['leader'],
+                                                            self._last_belief['follower'][-1],
+                                                            self._last_pred['follower'],
+                                                            ego_v,
+                                                            tangent_vector,
+                                                            self._last_belief["branch_time"]))
+                        if self.save_data:
+                            self.frame_data['leader_belief'] = self._last_belief['leader']
+                            self.frame_data['follower_belief'] = self._last_belief['follower']
+                            self.frame_data['branch_time'] = self._last_belief["branch_time"]
+                            self.frame_data['agent_history_x'] = self._last_belief['history_x']
+                            self.frame_data['agent_history_y'] = self._last_belief['history_y']
+                        break
+                    else:
+                        print(f'Agent {i+1} is not intersecting with global plan')
+            if (len(belief) == 1):
+                print(f'No Game: {belief[0]}')
+                if self.save_data:
+                    self.frame_data['game'] = False
+            else:
+                print(f'Leader: {belief[0]}')
+                print(f'Follower: {belief[1]}')
+                if self.save_data:
+                    self.frame_data['game'] = True
+                     
+            plan, other_plan = self._confingency_planner.step(
                 scenario=self._scenario,
                 current_lanelet_id=0,
                 time_step=iteration,
                 ego_state=current_state,
                 predictions=global_predictions,
                 cov=cov,
+                belief=belief,
+                v_max=target_speed,
             )
+
             
-            initial_condition = [ego_state.car_footprint.center.x, 
-                                ego_state.car_footprint.center.y,
-                                ego_state.dynamic_car_state.rear_axle_velocity_2d.x, 
-                                ego_state.car_footprint.center.heading
+            initial_condition = [
+                                    ego_state.car_footprint.center.x, 
+                                    ego_state.car_footprint.center.y,
+                                    ego_state.car_footprint.center.heading,
+                                    ego_state.dynamic_car_state.rear_axle_velocity_2d.x, 
                                 ]
-            # init_traj = [[float(s[0]), float(s[1]), float(s[2]), float(s[3])] for s in plan]
-            # global_predictions_2 = []
-            # for global_predition in global_predictions:
-            #     x = global_predition[:, 0]
-            #     y = global_predition[:, 1]
-            #     yaw = [math.atan2(y[i+1] - y[i], x[i+1] - x[i]) if i < len(x) - 1 else 0.0 for i in range(len(x))]
-            #     yaw[-1] = yaw[-2]
-            #     pred = [x, y, yaw]
-            #     global_predictions_2.append(pred)
-            
+            modality_index = np.argmax(belief)
             new_plan = self._motion_planner.plan(
                 initial_condition, 
                 plan.astype(np.float64), 
-                global_predictions.astype(np.float64))
-        
+                global_predictions[:, modality_index, :, :].astype(np.float64),
+                target_speed,
+                iteration
+            )
+
+            plt.cla()
+            index_vector = np.arange(0, 80, 10)
+            if f_pred_x is not None:
+                if belief[0] >= belief[1]:
+                    plt.plot(self._last_pred['leader'][0, index_vector], self._last_pred['leader'][1, index_vector], 'r^')
+                    plt.plot(self._last_pred['follower'][0, index_vector], self._last_pred['follower'][1, index_vector], 'g^')
+                else:
+                    plt.plot(self._last_pred['leader'][0, index_vector], self._last_pred['leader'][1, index_vector], 'g^')
+                    plt.plot(self._last_pred['follower'][0, index_vector], self._last_pred['follower'][1, index_vector], 'r^')
+            plt.legend(['leader', 'follower'])
+            plt.plot(plan[index_vector, 0], plan[index_vector, 1], 'ro')
+            if other_plan is not None:
+                other_len = other_plan.shape[0]
+                other_index_vector = np.arange(0, other_len, 10)
+                plt.plot(other_plan[other_index_vector, 0], other_plan[other_index_vector, 1], 'go')
+            if self.save_data:
+                if f_pred_x is not None:
+                    self.frame_data['leader_x'] = (self._last_pred['leader'][0, :]).tolist()
+                    self.frame_data['leader_y'] = (self._last_pred['leader'][1, :]).tolist()
+                    self.frame_data['follower_x'] = (self._last_pred['follower'][0, :]).tolist()
+                    self.frame_data['follower_y'] = (self._last_pred['follower'][1, :]).tolist()
+                self.frame_data['origin_plan_x'] = (plan[:, 0]).tolist()
+                self.frame_data['origin_plan_y'] = (plan[:, 1]).tolist()
+                if other_plan is not None:
+                    self.frame_data['other_plan_x'] = (other_plan[:, 0]).tolist()
+                    self.frame_data['other_plan_y'] = (other_plan[:, 1]).tolist()
+
             plan = np.array(new_plan)
-        
+            plt.plot(plan[index_vector, 0], plan[index_vector, 1], 'r-')
+            plt.axis('equal')
+            save_contingency_path = "/root/xzcllwx_ws/GameFormer-Planner/contingency"
+            plt.savefig(os.path.join(save_contingency_path, f'{iteration}.png'))
+            if self.save_data:
+                self.frame_data['new_paln_x'] = (plan[:, 0]).tolist()
+                self.frame_data['new_paln_y'] = (plan[:, 1]).tolist() 
+            # plt.show()
+            plan[:, [2, 3]] = plan[:, [3, 2]] # [x, y, yaw, v]
+            # ref_speed = [ target_speed for _ in plan[:, 3]]
+            # ref_traj = [tuple(i) for i in plan[:, :3]]
+            # self._smoother.set_reference_trajectory(
+            #                                initial_condition,
+            #                                ref_speed,
+            #                                ref_traj,)  
+            # self._smoother.set_obstacles(global_predictions[:,0,:,:])
+            # solution = self._smoother.solve()
+            # optimized_states = solution.value(self._smoother.state)
+            # new_plan = []
+            # for i in range(optimized_states.shape[1]):
+            #     new_plan.append([
+            #         optimized_states[0, i],
+            #         optimized_states[1, i],
+            #         optimized_states[2, i],
+            #         optimized_states[3, i]
+            #     ])
+            # plan = np.array(new_plan)
+            # Plot the original and optimized plans
+            save_data_to_csv(self.frame_data, iteration, self.csv_save_dir)
+            plan[:, 3] = calculate_path_curvature(plan) # [x, y, yaw, k]
+            self._global_plan = plan
             plan = LatticePlanner.transform_to_ego_frame(plan, ego_state)
-            
         
         # Trajectory refinement
         # with torch.no_grad():
@@ -515,7 +880,7 @@ class Planner(AbstractPlanner):
         states = transform_predictions_to_states(plan[:,:3], history.ego_states, self._future_horizon, DT)
         trajectory = InterpolatedTrajectory(states)
 
-        return trajectory, plan, output_predictions
+        return trajectory, plan, output_predictions, track_dict
         # return trajectory, plan, predictions[0].reshape(-1, T, D).cpu().numpy()
     
     def compute_planner_trajectory(self, current_input: PlannerInput):
@@ -531,9 +896,9 @@ class Planner(AbstractPlanner):
             self._initialize_route_plan(self._scenario_manager.get_route_roadblock_ids())
             self._path_planner = LatticePlanner(self._candidate_lane_edge_ids, self._max_path_length)
             self._init_laneletnets(ego_state)
-        trajectory, plan, predictions = self._plan(iteration, ego_state, history, traffic_light_data, observation)
+        trajectory, plan, predictions, track_dict = self._plan(iteration, ego_state, history, traffic_light_data, observation)
 
-        self._render = False
+        self._render = True
         
         if self._render:
             self._imgs.append(
@@ -544,6 +909,7 @@ class Planner(AbstractPlanner):
                         iteration=current_input.iteration.index,
                         planning_trajectory=plan[:, :2],
                         predictions=predictions,
+                        agent_attn_weights=track_dict,
                         return_img=self._render,
                     )
             )
@@ -564,3 +930,17 @@ class Planner(AbstractPlanner):
         print(f'Iteration {iteration}: {time.time() - s:.3f} s')
 
         return trajectory
+    
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # 排除motion_planner对象
+        state['_motion_planner'] = None
+        state['_smoother'] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # 重新初始化motion_planner
+        if self.config_path:
+            self._motion_planner = motion_planning.motion_planner(self.config_path)
+            self._smoother = MotionNonlinearSmoother(trajectory_len=T*10-1, dt=DT)

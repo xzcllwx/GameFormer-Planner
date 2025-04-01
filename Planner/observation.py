@@ -21,7 +21,7 @@ def observation_adapter(history_buffer, traffic_light_data, map_api, route_roadb
     observation_buffer = history_buffer.observation_buffer # Past observations including the current
 
     ego_agent_past = sampled_past_ego_states_to_tensor(ego_state_buffer)
-    past_tracked_objects_tensor_list, past_tracked_objects_types = sampled_tracked_objects_to_tensor_list(observation_buffer)
+    past_tracked_objects_tensor_list, past_tracked_objects_types, track_ids = sampled_tracked_objects_to_tensor_list(observation_buffer)
     time_stamps_past = sampled_past_timestamps_to_tensor([state.time_point for state in ego_state_buffer])
     ego_state = history_buffer.current_state[0]
     ego_coords = Point2D(ego_state.rear_axle.x, ego_state.rear_axle.y)
@@ -29,8 +29,8 @@ def observation_adapter(history_buffer, traffic_light_data, map_api, route_roadb
         map_api, map_features, ego_coords, radius, route_roadblock_ids, traffic_light_data
     )
 
-    ego_agent_past, neighbor_agents_past = agent_past_process(
-        ego_agent_past, time_stamps_past, past_tracked_objects_tensor_list, past_tracked_objects_types, num_agents
+    ego_agent_past, neighbor_agents_past, targer_track_ids = agent_past_process(
+        ego_agent_past, time_stamps_past, past_tracked_objects_tensor_list, past_tracked_objects_types, num_agents, track_ids
     )
 
     vector_map = map_process(ego_state.rear_axle, coords, traffic_light_data, map_features, 
@@ -41,7 +41,7 @@ def observation_adapter(history_buffer, traffic_light_data, map_api, route_roadb
     data.update(vector_map)
     data = convert_to_model_inputs(data, device)
 
-    return data
+    return data, targer_track_ids
 
 
 def convert_to_model_inputs(data, device):
@@ -52,18 +52,17 @@ def convert_to_model_inputs(data, device):
     return tensor_data
 
 
-def extract_agent_tensor(tracked_objects, track_token_ids, object_types):
+def extract_agent_tensor(tracked_objects, track_token_ids, object_types, track_ids):
     agents = tracked_objects.get_tracked_objects_of_types(object_types)
     agent_types = []
     output = torch.zeros((len(agents), AgentInternalIndex.dim()), dtype=torch.float32)
     max_agent_id = len(track_token_ids)
-
     for idx, agent in enumerate(agents):
         if agent.track_token not in track_token_ids:
             track_token_ids[agent.track_token] = max_agent_id
+            track_ids[max_agent_id] = agent.track_token
             max_agent_id += 1
-        track_token_int = track_token_ids[agent.track_token]
-
+        track_token_int = track_token_ids[agent.track_token] 
         output[idx, AgentInternalIndex.track_token()] = float(track_token_int)
         output[idx, AgentInternalIndex.vx()] = agent.velocity.x
         output[idx, AgentInternalIndex.vy()] = agent.velocity.y
@@ -78,17 +77,18 @@ def extract_agent_tensor(tracked_objects, track_token_ids, object_types):
 
 
 def sampled_tracked_objects_to_tensor_list(past_tracked_objects):
-    object_types = [TrackedObjectType.VEHICLE, TrackedObjectType.PEDESTRIAN, TrackedObjectType.BICYCLE]
+    object_types = [TrackedObjectType.VEHICLE]
     output = []
     output_types = []
     track_token_ids = {}
+    track_ids = {}
 
     for i in range(len(past_tracked_objects)):
-        tensorized, track_token_ids, agent_types = extract_agent_tensor(past_tracked_objects[i].tracked_objects, track_token_ids, object_types)
+        tensorized, track_token_ids, agent_types = extract_agent_tensor(past_tracked_objects[i].tracked_objects, track_token_ids, object_types, track_ids)
         output.append(tensorized)
         output_types.append(agent_types)
 
-    return output, output_types
+    return output, output_types, track_ids
 
 
 def convert_feature_layer_to_fixed_size(ego_pose, feature_coords, feature_tl_data, max_elements, max_points,
@@ -171,7 +171,7 @@ def convert_absolute_quantities_to_relative(agent_state, ego_state, agent_type='
     return agent_state
 
 
-def agent_past_process(past_ego_states, past_time_stamps, past_tracked_objects, tracked_objects_types, num_agents):
+def agent_past_process(past_ego_states, past_time_stamps, past_tracked_objects, tracked_objects_types, num_agents, track_ids):
     agents_states_dim = Agents.agents_states_dim()
     ego_history = past_ego_states
     time_stamps = past_time_stamps
@@ -181,7 +181,7 @@ def agent_past_process(past_ego_states, past_time_stamps, past_tracked_objects, 
     ego_tensor = convert_absolute_quantities_to_relative(ego_history, anchor_ego_state)
     agent_history = filter_agents_tensor(agents, reverse=True)
     agent_types = tracked_objects_types[-1]
-
+    target_track_ids = []
     if agent_history[-1].shape[0] == 0:
         # Return zero tensor when there are no agents in the scene
         agents_tensor = torch.zeros((len(agent_history), 0, agents_states_dim)).float()
@@ -196,20 +196,27 @@ def agent_past_process(past_ego_states, past_time_stamps, past_tracked_objects, 
         yaw_rate_horizon = compute_yaw_rate_from_state_tensors(padded_agent_states, time_stamps)
     
         agents_tensor = pack_agents_tensor(local_coords_agent_states, yaw_rate_horizon)
+        
+        for agent in local_coords_agent_states[-1]:
+            index = int(agent[AgentInternalIndex.track_token()].item())
+            target_track_ids.append(track_ids[index])
 
     agents = torch.zeros((num_agents, agents_tensor.shape[0], agents_tensor.shape[-1]+3), dtype=torch.float32)
 
     # sort agents according to distance to ego
     distance_to_ego = torch.norm(agents_tensor[-1, :, :2], dim=-1)
     indices = list(torch.argsort(distance_to_ego).numpy())[:num_agents]
-
+    output_ids = []
     # fill agent features into the array
     added_agents = 0
+    print(f"len indices: {len(indices)}")
     for i in indices:
         if added_agents >= num_agents:
             break
         
-        if agents_tensor[-1, i, 0] < -6.0:
+        if agents_tensor[-1, i, 0] < -50.0 or agents_tensor[-1, i, 0] > 100.0:
+            continue
+        if np.abs(agents_tensor[-1, i, 1]) > 2.5 * 3.4:
             continue
 
         agents[added_agents, :, :agents_tensor.shape[-1]] = agents_tensor[:, i, :agents_tensor.shape[-1]]
@@ -221,9 +228,11 @@ def agent_past_process(past_ego_states, past_time_stamps, past_tracked_objects, 
         else:
             agents[added_agents, :, agents_tensor.shape[-1]:] = torch.tensor([0, 0, 1])
 
+        output_ids.append(target_track_ids[i])
         added_agents += 1
-
-    return ego_tensor, agents
+    print("added agents: ", added_agents)
+    print(f"observe track length: {len(output_ids)}")
+    return ego_tensor, agents, output_ids
 
 
 def get_neighbor_vector_set_map(

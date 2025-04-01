@@ -1,6 +1,6 @@
 python run_nuplan_test.py \
---experiment_name open_loop_boxes \
---data_path /root/data/alstar/nuplan/dataset/nuplan-v1.1/splits/test \
+--experiment_name closed_loop_reactive_agents \
+--data_path /root/data/alstar/nuplan/dataset/nuplan-v1.1/splits/train \
 --map_path /root/xzcllwx_ws/nuplan_dataset_process/maps \
 --model_path /root/xzcllwx_ws/GameFormer-Planner/training_log/Exp3/model_epoch_30_valADE_1.1357.pth \
---config_path /root/xzcllwx_ws/GameFormer-Planner/config/scenario_filter/test14-random.yaml
+--config_path /root/xzcllwx_ws/GameFormer-Planner/config/scenario_filter/exp_debug.yaml

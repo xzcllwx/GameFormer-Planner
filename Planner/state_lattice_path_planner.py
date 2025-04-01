@@ -33,15 +33,19 @@ class LatticePlanner:
                 path_polyline.extend(edge.baseline_path.discrete_path)
             # 可视化看一下path_polyline
             path_polyline = self.check_path(np.array(path_to_linestring(path_polyline).coords))
+            origin_polyline = path_polyline
             dist_to_ego = scipy.spatial.distance.cdist([self.ego_point], path_polyline)
+            if dist_to_ego.min() < 1.5:
+                # pass
+                continue # change lane scenario
             path_polyline = path_polyline[dist_to_ego.argmin():]
             if len(path_polyline) < 3:
                 continue
 
-            path_len = len(path_polyline) * 0.25 # 点间距为0.25m
+            path_len = len(path_polyline) * 0.25
             polyline_heading = self.calculate_path_heading(path_polyline)
             path_polyline = np.stack([path_polyline[:, 0], path_polyline[:, 1], polyline_heading], axis=1)
-            candidate_paths[i] = (path_len, dist_to_ego.min(), path, path_polyline)
+            candidate_paths[i] = (path_len, dist_to_ego.min(), path, path_polyline, origin_polyline)
 
         if len(candidate_paths) == 0:
             return None
@@ -81,6 +85,8 @@ class LatticePlanner:
 
         if candidate_paths is None:
             return None
+        
+        
 
         # Get obstacles
         object_types = [TrackedObjectType.VEHICLE, TrackedObjectType.BARRIER,
@@ -117,23 +123,27 @@ class LatticePlanner:
         optimal_path = None
         min_cost = np.inf
         
+        optimal_origin_path = None
         for path in paths:
             cost = self.calculate_cost(path, obstacles, vehicles)
             if cost < min_cost:
                 min_cost = cost
                 optimal_path = path[0]
-
+                optimal_origin_path = path[4]
+                
         # Post-process the path
         ref_path = self.post_process(optimal_path, ego_state)
-
-        return ref_path
+        polyline_heading = self.calculate_path_heading(optimal_origin_path)
+        optimal_origin_path = np.stack([optimal_origin_path[:, 0], optimal_origin_path[:, 1], polyline_heading], axis=1)
+        
+        return ref_path, optimal_origin_path
 
     def generate_paths(self, ego_state, paths):
         '''Generate paths from state lattice'''
         new_paths = []
         ego_state = ego_state.rear_axle.x, ego_state.rear_axle.y, ego_state.rear_axle.heading
         
-        for _, (path_len, dist, path, path_polyline) in paths:
+        for _, (path_len, dist, path, path_polyline, origin_polyline) in paths:
             if len(path_polyline) > 81:
                 sampled_index = np.array([5, 10, 15, 20]) * 4
             elif len(path_polyline) > 61:
@@ -151,7 +161,7 @@ class LatticePlanner:
                                                             state[0], state[1], state[2], 3, sampled_index[j])[0]
                 second_stage_path = path_polyline[sampled_index[j]+1:, :2]
                 path_polyline = np.concatenate([first_stage_path, second_stage_path], axis=0)
-                new_paths.append((path_polyline, dist, path, path_len))     
+                new_paths.append((path_polyline, dist, path, path_len, origin_polyline))     
 
         return new_paths
 

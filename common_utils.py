@@ -33,10 +33,12 @@ from nuplan.planning.metrics.evaluation_metrics.common.time_to_collision_within_
 ### Parameters
 T = 8 # [s] planning horizon
 DT = 0.1 # [s] time interval
-LENGTH = get_pacifica_parameters().front_length # [m] vehicle front length
+FREQUENCE = 10 # Hz
+LENGTH = get_pacifica_parameters().front_length + get_pacifica_parameters().rear_length # [m] vehicle front length
 WHEEL_BASE = get_pacifica_parameters().wheel_base # [m] vehicle wheel base
 WIDTH = get_pacifica_parameters().width # [m] vehicle width
-MAX_LEN = 120 # [m] max length of the path
+MAX_LEN = 200 # [m] max length of the path
+REVERSE_EXTEND_LEN = 50 # [M] [-50, 200]
 
 
 ### Simulation setting

@@ -73,7 +73,6 @@ def build_simulation(experiment, planner, scenarios, output_dir, simulation_dir,
 
     metric_engine = build_metrics_engine(experiment, output_dir, metric_dir)
     print('Building metric engines...DONE\n')
-
     # Iterate through scenarios
     for scenario in tqdm(scenarios, desc='Running simulation'):
         tracker = LQRTracker(q_longitudinal=[10.0], r_longitudinal=[1.0], q_lateral=[1.0, 10.0, 0.0], 
@@ -81,7 +80,7 @@ def build_simulation(experiment, planner, scenarios, output_dir, simulation_dir,
                             jerk_penalty=1e-4, curvature_rate_penalty=1e-2, 
                             stopping_proportional_gain=0.5, stopping_velocity=0.2)
         motion_model = KinematicBicycleModel(get_pacifica_parameters())
-
+        print(f"Scenario: {scenario.token}")
         # Ego Controller and Perception
         if experiment == 'open_loop_boxes':
             ego_controller = LogPlaybackController(scenario) 

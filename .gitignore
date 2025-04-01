@@ -6,3 +6,13 @@ training_log/
 iLQR/
 planner/Frenet/
 .vscode/
+figure/
+config/
+risk/
+*.mp4
+*.yaml
+.csv
+csv/
+contingency/
+*.log
+belief/
