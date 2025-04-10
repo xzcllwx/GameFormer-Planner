@@ -3,6 +3,8 @@ import os
 sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
 import math
 import time
+import matplotlib
+matplotlib.use('Agg')  # 设置非交互式后端
 import matplotlib.pyplot as plt
 from shapely.geometry import Point, LineString
 from shapely.geometry.base import CAP_STYLE
@@ -101,7 +103,7 @@ class Planner(AbstractPlanner):
         self._goal = initialization.mission_goal # mission goal StateSE2
         self._route_roadblock_ids = initialization.route_roadblock_ids
         # self._initialize_route_plan(self._route_roadblock_ids)
-        # self._initialize_model()
+        self._initialize_model()
         self._confingency_planner = None
         self._trajectory_planner = TrajectoryPlanner()
         self._path_planner = None
@@ -496,13 +498,44 @@ class Planner(AbstractPlanner):
             self.frame_data['target_speed'] = target_speed
         # Infer prediction model
         with torch.no_grad():
-            # plan, predictions, scores, ego_state_transformed, neighbors_state_transformed = self._get_prediction(features)
-            predictions, scores = self._get_constant_speed_prediction(features)
+            model_plan, predictions, scores, ego_state_transformed, neighbors_state_transformed = self._get_prediction(features)
+            # predictions, scores = self._get_constant_speed_prediction(features)
+                        # ref_speed = [ target_speed for _ in plan[:, 3]]
+            model_plan = model_plan.squeeze(0)
+            model_plan = model_plan.cpu().numpy()
+            ref_traj = [tuple(i) for i in model_plan[:, :3]]
+            ref_speed = [i for i in model_plan[:, 3]]
+            initial_condition = [
+                                    0.0, 
+                                    0.0,
+                                    0.0,
+                                    ego_state.dynamic_car_state.rear_axle_velocity_2d.x, 
+                                ]
+            self._smoother.set_reference_trajectory(
+                                           initial_condition,
+                                           ref_speed,
+                                           ref_traj,)  
+            solution = self._smoother.solve()
+            optimized_states = solution.value(self._smoother.state)
+            new_plan = np.zeros((optimized_states.shape[1], 4))
+            new_plan[:, 0] = optimized_states[0, :]
+            new_plan[:, 1] = optimized_states[1, :]
+            new_plan[:, 2] = optimized_states[2, :]
+            new_plan[:, 3] = optimized_states[3, :]
+            model_plan = [new_plan]
+            ref_traj = copy.deepcopy(new_plan)
+            ref_traj[:, :2] = np.matmul(ref_traj[:, :2], rot_mat.T)
+            ref_traj[:, :2] = ref_traj[:, :2] + translation
+            plt.cla()
+            plt.plot(global_path[:, 0], global_path[:, 1], 'r')
+            plt.plot(ref_traj[:, 0], ref_traj[:, 1], 'b')
+            plt.savefig(f'/root/xzcllwx_ws/GameFormer-Planner/ref/{iteration}.png')
+            plt.close()
             
         with torch.no_grad():  
             _, N, _, _, _ = predictions.shape
             scores = scores.squeeze(0)  # 移除批次维度，变成 [N, M]
-            # scores =  scores[1:, :]  # 移除第一个agent的预测 → 对于预测模型，需要确认
+            scores =  scores[1:, :]  # 移除第一个agent的预测 → 对于预测模型，需要确认
             predictions = predictions.squeeze(0)  # 移除批次维度，变成 [N, M, T, D]
             
             best_indices = torch.argmax(scores, dim=1)  # 维度 [N]
@@ -793,6 +826,7 @@ class Planner(AbstractPlanner):
                 cov=cov,
                 belief=belief,
                 v_max=target_speed,
+                ref_traj=ref_traj,
             )
 
             
@@ -880,7 +914,7 @@ class Planner(AbstractPlanner):
         states = transform_predictions_to_states(plan[:,:3], history.ego_states, self._future_horizon, DT)
         trajectory = InterpolatedTrajectory(states)
 
-        return trajectory, plan, output_predictions, track_dict
+        return trajectory, plan, output_predictions, track_dict, model_plan
         # return trajectory, plan, predictions[0].reshape(-1, T, D).cpu().numpy()
     
     def compute_planner_trajectory(self, current_input: PlannerInput):
@@ -896,7 +930,7 @@ class Planner(AbstractPlanner):
             self._initialize_route_plan(self._scenario_manager.get_route_roadblock_ids())
             self._path_planner = LatticePlanner(self._candidate_lane_edge_ids, self._max_path_length)
             self._init_laneletnets(ego_state)
-        trajectory, plan, predictions, track_dict = self._plan(iteration, ego_state, history, traffic_light_data, observation)
+        trajectory, plan, predictions, track_dict, model_plan = self._plan(iteration, ego_state, history, traffic_light_data, observation)
 
         self._render = True
         
@@ -910,6 +944,7 @@ class Planner(AbstractPlanner):
                         planning_trajectory=plan[:, :2],
                         predictions=predictions,
                         agent_attn_weights=track_dict,
+                        candidate_trajectories=model_plan,
                         return_img=self._render,
                     )
             )

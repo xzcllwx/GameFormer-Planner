@@ -126,7 +126,7 @@ class NeuralPlanner(nn.Module):
         x = initial_state[:, None, 0] + torch.cumsum(vel_x * dt, dim=-1)
         y = initial_state[:, None, 1] + torch.cumsum(vel_y * dt, dim=-1)
 
-        return torch.stack((x, y, yaw), dim=-1)
+        return torch.stack((x, y, yaw, vel), dim=-1)
 
     def forward(self, env_encoding, route_lanes, initial_state):
         route_lanes, mask = self.route_encoder(route_lanes) # [64,6,256]

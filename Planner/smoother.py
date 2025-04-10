@@ -52,10 +52,10 @@ class MotionNonlinearSmoother:
         self._set_control_constraints()
         self._set_objective()
         
-        self.constraint_active = self._optimizer.parameter(1, 1)
-        self._optimizer.set_value(self.constraint_active, 1)  # 默认激活
+        # self.constraint_active = self._optimizer.parameter(1, 1)
+        # self._optimizer.set_value(self.constraint_active, 1)  # 默认激活
 
-        self._add_collision_constraints()
+        # self._add_collision_constraints()
         # Set default solver options (quiet)
         options = {"ipopt.print_level": 0, "print_time": 0, "ipopt.sb": "yes", "ipopt.max_iter": 30}
         self.set_solver_optimizerons(options)
@@ -115,13 +115,13 @@ class MotionNonlinearSmoother:
         self.ref_traj = self._optimizer.parameter(3, self.trajectory_len + 1)  # (x, y, yaw)
         self.x_curr = self._optimizer.parameter(self.nx, 1)
         
-        # 修改参数结构以支持椭圆和预测轨迹
-        # 时间步 x 参数 x 障碍物数量
-        self.max_obstacles = 5 
-        # 参数: [x, y, heading, a, b, confidence]
-        # a: 长半轴, b: 短半轴
-        self.obstacle_params = self._optimizer.parameter(5, self.max_obstacles * (self.trajectory_len + 1))
-        self.n_obstacles = self._optimizer.parameter(1, 1)  # 实际障碍物数量
+        # # 修改参数结构以支持椭圆和预测轨迹
+        # # 时间步 x 参数 x 障碍物数量
+        # self.max_obstacles = 5 
+        # # 参数: [x, y, heading, a, b, confidence]
+        # # a: 长半轴, b: 短半轴
+        # self.obstacle_params = self._optimizer.parameter(5, self.max_obstacles * (self.trajectory_len + 1))
+        # self.n_obstacles = self._optimizer.parameter(1, 1)  # 实际障碍物数量
 
     def _compute_ellipse_distance(self, point_x, point_y, ellipse_x, ellipse_y, heading, a, b):
         """计算点到椭圆的距离，增强数值稳定性"""
@@ -211,7 +211,7 @@ class MotionNonlinearSmoother:
     def _set_objective(self) -> None:
         """Set the objective function. Use care when modifying these weights."""
         # Follow reference, minimize control rates and absolute inputs
-        alpha_xy = 1.0
+        alpha_xy = 10.0
         alpha_yaw = 10.0
         alpha_rate = 0.6
         alpha_abs = 0.1
