@@ -31,7 +31,11 @@ def images_to_video(image_folder, output_video_name, fps=10):  # Set fps to 10
     print(f"Video saved as {output_video_path}")
 
 # Example usage
-image_folder = "/root/xzcllwx_ws/GameFormer-Planner/risk"  # Replace with your folder path
+image_folder = "/root/xzcllwx_ws/GameFormer-Planner/plan"  # Replace with your folder path
 output_video_name = "output_video.mp4"  # Replace with your desired output file name
 fps = 10  # Frames per second (0.1s per frame)
+images_to_video(image_folder, output_video_name, fps)
+image_folder = "/root/xzcllwx_ws/GameFormer-Planner/risk"  # Replace with your folder path
+images_to_video(image_folder, output_video_name, fps)
+image_folder = "/root/xzcllwx_ws/GameFormer-Planner/figure"  # Replace with your folder path
 images_to_video(image_folder, output_video_name, fps)

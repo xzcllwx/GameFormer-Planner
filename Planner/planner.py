@@ -49,7 +49,7 @@ from commonroad.scenario.obstacle import DynamicObstacle, ObstacleType
 from commonroad.common.util import Interval
 from commonroad_helper_functions.utils.cubicspline import CubicSpline2D
 
-
+from .SceneLoaderUtil import SceneLoader
 
 
 class Planner(AbstractPlanner):
@@ -57,7 +57,7 @@ class Planner(AbstractPlanner):
         self._max_path_length = MAX_LEN # [m]
         self._future_horizon = T # [s] 
         self._step_interval = DT # [s]
-        self._target_speed = 13.0 # [m/s]
+        self._target_speed = 6.0 # [m/s]
         self._N_points = int(T/DT)
         self._model_path = model_path
 
@@ -72,7 +72,7 @@ class Planner(AbstractPlanner):
         
         self._render = False
         self._time = False
-        self._N_agent = 5
+        self._N_agent = 1
         self._N_static_obstacle = 0
         # load settings from planning_fast.json
         settings_dict = load_planning_json("planning_fast.json")
@@ -108,7 +108,9 @@ class Planner(AbstractPlanner):
         self._trajectory_planner = TrajectoryPlanner()
         self._path_planner = None
         self._scenario_manager = None
-        self._scene_render = NuplanScenarioRender()
+        ego_csv = '/root/xzcllwx_ws/GameFormer-Planner/Exp3/cs55_record.csv'
+        npc_csv = '/root/xzcllwx_ws/GameFormer-Planner/Exp3/npc_record.csv'
+        self._scene_loader = SceneLoader(ego_csv_file=ego_csv, npc_csv_file=npc_csv ,device=self._device)
         self._imgs = []
         self._save_dir = '/root/xzcllwx_ws/GameFormer-Planner/figure'
         if not os.path.exists(self._save_dir):
@@ -119,7 +121,7 @@ class Planner(AbstractPlanner):
         self._global_plan = None
         
         self._reference_spline = None
-        self._target_speed = 13.0
+        self._target_speed = 5.0
         
         self._last_track_target = None
         self._last_belief = {"leader": [], "follower": [], "begin_iteration": 0, "history_x": [], "history_y": [], "branch_time": []}
@@ -137,7 +139,7 @@ class Planner(AbstractPlanner):
             "steer_angle": [],
             "steering_rate": [],            
         }
-
+        self.ego_acc = []
 
     def _initialize_model(self):
         # The parameters of the model should be the same as the one used in training
@@ -208,54 +210,28 @@ class Planner(AbstractPlanner):
        
         position_list = list()
         lanelets_of_goal_position = dict()
-        for id in self._candidate_lane_edge_ids:
+        lanes = self._scene_loader.lanes
+        for idx, lane in enumerate(lanes.values()):
             # print(f'lane id: {id}')
-            lane = self._map_api.get_map_object(id, SemanticMapLayer.LANE)
-            lane = lane or self._map_api.get_map_object(id, SemanticMapLayer.LANE_CONNECTOR)
-
-            # bound [[x0,x1,...,xn],[y0,y1,...,yn]]
-            # 创建指定形状的空数组
-            point_count = len(lane.baseline_path.discrete_path)
-            # print(f'base point count: {point_count}')
-            base_line = np.ndarray(shape=(2, point_count), dtype=np.float32)
-            base_line[0] = [p.x for p in lane.baseline_path.discrete_path]
-            base_line[1] = [p.y for p in lane.baseline_path.discrete_path]
-            base_line = base_line.T 
-            
-            point_count = len(lane.left_boundary.discrete_path)
-            # print(f'left point count: {point_count}')
-            left_bound = np.ndarray(shape=(2, point_count), dtype=np.float32)
-            left_bound[0] = [p.x for p in lane.left_boundary.discrete_path]
-            left_bound[1] = [p.y for p in lane.left_boundary.discrete_path]
-            left_bound = left_bound.T
-            
-            point_count = len(lane.right_boundary.discrete_path)
-            # print(f'right point count: {point_count}')
-            right_bound = np.ndarray(shape=(2, point_count), dtype=np.float32)
-            right_bound[0] = [p.x for p in lane.right_boundary.discrete_path]
-            right_bound[1] = [p.y for p in lane.right_boundary.discrete_path]
-            right_bound = right_bound.T
-             
+            left_bound = lane["left_boundary"]
+            right_bound = lane["right_boundary"]
+            base_line = lane["center"]
+        
             lanelet = Lanelet(
                 left_vertices = left_bound, 
                 center_vertices = base_line, 
                 right_vertices = right_bound, 
-                lanelet_id = int(lane.id))
+                lanelet_id = int(idx))
             self._scenario.lanelet_network.add_lanelet(lanelet)
             polygon = lanelet.convert_to_polygon()
             position_list.append(polygon)
-            if 0 not in lanelets_of_goal_position:
-                lanelets_of_goal_position[0] = []
-            lanelets_of_goal_position[0].append(lanelet.lanelet_id)
+            if idx == 0:
+                if 0 not in lanelets_of_goal_position:
+                    lanelets_of_goal_position[0] = []
+                lanelets_of_goal_position[0].append(lanelet.lanelet_id)
 
         # creat planning problem
-        init_state_args = dict()
-        init_state_args['position'] = np.array([initial_state.car_footprint.center.x, initial_state.car_footprint.center.y])
-        init_state_args['orientation'] = initial_state.car_footprint.center.heading
-        init_state_args['velocity'] = initial_state.dynamic_car_state.rear_axle_velocity_2d.x
-        init_state_args['acceleration'] = initial_state.dynamic_car_state.rear_axle_acceleration_2d.x
-        init_state_args['yaw_rate'] = initial_state.dynamic_car_state.angular_velocity
-        init_state_args['slip_angle'] = initial_state.dynamic_car_state.tire_steering_rate
+        init_state_args = self._scene_loader.get_initial_state()
         init_state_args['time_step'] = Interval(0, 0) # ms
         init_state = State(**init_state_args)
         position = ShapeGroup(position_list)
@@ -272,8 +248,8 @@ class Planner(AbstractPlanner):
             goal_region = goal_region,
         )
         
-        self._car_w = initial_state.car_footprint.width
-        self._car_l = initial_state.car_footprint.length
+        self._car_w = 1.9
+        self._car_l = 4.5
         # add obstacle to scenario
         self._add_obstacle()
         
@@ -449,8 +425,12 @@ class Planner(AbstractPlanner):
     
     def _plan(self, iteration, ego_state, history, traffic_light_data, observation):
         
+        features, track_ids, ref_path, target_speed, ego_state = self._scene_loader.prepare_feature(iteration, ego_state)
+        
         rotation = ego_state.car_footprint.center.heading
         translation = np.array([ego_state.car_footprint.center.x, ego_state.car_footprint.center.y]).reshape(1, 2)
+        print(translation)
+        print(rotation)
         rot_mat = np.array(
             [[np.cos(rotation), -np.sin(rotation)], [np.sin(rotation), np.cos(rotation)]]
         )
@@ -458,26 +438,67 @@ class Planner(AbstractPlanner):
             self.frame_data = {}
             self.frame_data['iteration'] = iteration
             self.frame_data['timestamp'] = iteration * DT
+            
+        self.ego_acc.append(ego_state.dynamic_car_state.rear_axle_acceleration_2d.x)
+        plt.cla()
+        time = np.arange(0, len(self.ego_acc), 1)
+        plt.gca().set_aspect('auto', adjustable='datalim')
+        plt.plot(time*0.1, self.ego_acc, 'r')
+        plt.savefig(f'/root/xzcllwx_ws/GameFormer-Planner/acc/{iteration}.png')
+        plt.close()
         
         # Construct input features
         # 转换到了ego坐标系下
-        features, track_ids = observation_adapter(history, traffic_light_data, self._map_api, self._route_roadblock_ids, self._device) 
+        # features, track_ids = observation_adapter(history, traffic_light_data, self._map_api, self._route_roadblock_ids, self._device) 
 
         # update the scenario by feature
         valid_agent_num = self._update_scenario_by_feature(features, self._N_agent)
 
         # Get reference path
     
-        if self._reference_spline is None:
+        if self._reference_spline is None and ref_path is not None:
             print("init reference path")
-            ref_path, target_speed, optimal_origin_path = self._get_reference_path(ego_state, traffic_light_data, observation)
-            self._target_speed = target_speed
+            # ref_path, target_speed, optimal_origin_path = self._get_reference_path(ego_state, traffic_light_data, observation)
+            # ref_paht_index = np.linspace(0, len(ref_path)-1, num=80).astype(int)
+            # ref_traj = [tuple(i) for i in ref_path[ref_paht_index, :3]]
+            # ref_speed = [i for i in ref_path[ref_paht_index, 3]]
+            # start_condition = [
+            #                         ref_path[0, 0],
+            #                         ref_path[0, 1],
+            #                         ref_path[0, 2],
+            #                         ref_path[0, 3],
+            #                     ]
+            # self._smoother.set_reference_trajectory(
+            #                                start_condition,
+            #                                ref_speed,
+            #                                ref_traj,)  
+            # solution = self._smoother.solve()
+            # optimized_states = solution.value(self._smoother.state)
+            # ref_path = np.zeros((optimized_states.shape[1], 2))
+            # ref_path[:, 0] = optimized_states[0, :]
+            # ref_path[:, 1] = optimized_states[1, :]
+            
+            # Extend the reference path by line
+            ref_path = ref_path[:,:2]
+            extend_len = 200
+            extend_point_num = int(extend_len / 1.0 )
+            last_point = ref_path[-1]
+            if len(ref_path) >= 5:
+                direction = ref_path[-1, :2] - ref_path[-5, :2]  # 计算方向向量
+                # 沿着该方向添加新点
+                direction = direction / np.linalg.norm(direction)  # Normalize the direction vector
+                extended_points = np.array([last_point + direction * (i+1)
+                                        for i in range(extend_point_num)])
+                ref_path = np.append(ref_path, extended_points, axis=0)
+            
+            
+            # self._target_speed = target_speed
             # Transform reference path
             global_path = ref_path[:,:2]
-            global_path = np.matmul(global_path, rot_mat.T)
-            global_path = global_path + translation
+            # global_path = np.matmul(global_path, rot_mat.T)
+            # global_path = global_path + translation
             # Downsample global_path to 1m intervals
-            downsampled_indices = np.arange(0, len(global_path), 10)
+            downsampled_indices = np.arange(0, len(global_path), 5)
             global_path = global_path[downsampled_indices]
             self._reference_spline = CubicSpline2D(x=global_path[:, 0], y=global_path[:, 1])
             self._confingency_planner.init_global_path(global_path)
@@ -493,7 +514,7 @@ class Planner(AbstractPlanner):
             else:
                 print("Set reference line failed!")
 
-        target_speed = self._target_speed
+        # target_speed = self._target_speed
         if self.save_data:
             self.frame_data['target_speed'] = target_speed
         # Infer prediction model
@@ -509,7 +530,7 @@ class Planner(AbstractPlanner):
                                     0.0, 
                                     0.0,
                                     0.0,
-                                    ego_state.dynamic_car_state.rear_axle_velocity_2d.x, 
+                                    np.sqrt(ego_state.dynamic_car_state.rear_axle_velocity_2d.x**2 + ego_state.dynamic_car_state.rear_axle_velocity_2d.y**2)
                                 ]
             self._smoother.set_reference_trajectory(
                                            initial_condition,
@@ -523,14 +544,18 @@ class Planner(AbstractPlanner):
             new_plan[:, 2] = optimized_states[2, :]
             new_plan[:, 3] = optimized_states[3, :]
             model_plan = [new_plan]
+            # model_plan = None
             ref_traj = copy.deepcopy(new_plan)
             ref_traj[:, :2] = np.matmul(ref_traj[:, :2], rot_mat.T)
             ref_traj[:, :2] = ref_traj[:, :2] + translation
             plt.cla()
-            plt.plot(global_path[:, 0], global_path[:, 1], 'r')
+            # plt.plot(global_path[:, 0], global_path[:, 1], 'r')
             plt.plot(ref_traj[:, 0], ref_traj[:, 1], 'b')
             plt.savefig(f'/root/xzcllwx_ws/GameFormer-Planner/ref/{iteration}.png')
             plt.close()
+            if self.save_data:
+                self.frame_data['ref_traj_x'] = (ref_traj[:, 0]).tolist()
+                self.frame_data['ref_traj_y'] = (ref_traj[:, 1]).tolist()
             
         with torch.no_grad():  
             _, N, _, _, _ = predictions.shape
@@ -591,9 +616,16 @@ class Planner(AbstractPlanner):
                 self.frame_data['ego_y'] = self._ego_state['y']
                 self._ego_state['heading'].append(ego_state.car_footprint.center.heading)
                 self.frame_data['ego_heading'] = self._ego_state['heading']
-                self._ego_state['velocity'].append(np.sqrt(ego_state.dynamic_car_state.rear_axle_velocity_2d.x**2 + ego_state.dynamic_car_state.rear_axle_velocity_2d.y**2))
+                dir_vector = np.array([np.cos(ego_state.car_footprint.center.heading), np.sin(ego_state.car_footprint.center.heading)])
+                vel_vector = np.array([ego_state.dynamic_car_state.rear_axle_velocity_2d.x, ego_state.dynamic_car_state.rear_axle_velocity_2d.y])
+                acc_vector = np.array([ego_state.dynamic_car_state.rear_axle_acceleration_2d.x, ego_state.dynamic_car_state.rear_axle_acceleration_2d.y])
+                vel_projection = np.dot(vel_vector, dir_vector)
+                acc_projection = np.dot(acc_vector, dir_vector)
+                # self._ego_state['velocity'].append(np.sqrt(ego_state.dynamic_car_state.rear_axle_velocity_2d.x**2 + ego_state.dynamic_car_state.rear_axle_velocity_2d.y**2))
+                self._ego_state['velocity'].append(vel_projection)
                 self.frame_data['ego_velocity'] = self._ego_state['velocity']
-                self._ego_state['acceleration'].append(np.sqrt(ego_state.dynamic_car_state.rear_axle_acceleration_2d.x**2 + ego_state.dynamic_car_state.rear_axle_acceleration_2d.y**2))
+                # self._ego_state['acceleration'].append(np.sqrt(ego_state.dynamic_car_state.rear_axle_acceleration_2d.x**2 + ego_state.dynamic_car_state.rear_axle_acceleration_2d.y**2))
+                self._ego_state['acceleration'].append(ego_state.dynamic_car_state.rear_axle_acceleration_2d.x)
                 self.frame_data['ego_acceleration'] = self._ego_state['acceleration']
                 self._ego_state['yaw_rate'].append(ego_state.dynamic_car_state.angular_velocity)
                 self.frame_data['ego_yaw_rate'] = self._ego_state['yaw_rate']
@@ -791,6 +823,7 @@ class Planner(AbstractPlanner):
                         plt.legend(['leader', 'follower'])
                         save_belief_path = "/root/xzcllwx_ws/GameFormer-Planner/belief"
                         plt.savefig(os.path.join(save_belief_path, f'{iteration}.png'))
+                        print("caculate branch time")
                         self._last_belief["branch_time"].append(calcualte_branch_time(self._last_belief['leader'][-1], 
                                                             self._last_pred['leader'],
                                                             self._last_belief['follower'][-1],
@@ -809,6 +842,7 @@ class Planner(AbstractPlanner):
                         print(f'Agent {i+1} is not intersecting with global plan')
             if (len(belief) == 1):
                 print(f'No Game: {belief[0]}')
+                self._last_track_target = None
                 if self.save_data:
                     self.frame_data['game'] = False
             else:
@@ -924,11 +958,11 @@ class Planner(AbstractPlanner):
         traffic_light_data = list(current_input.traffic_light_data)
         ego_state, observation = history.current_state
         if self._scenario_manager is None:
-            self._scenario_manager = ScenarioManager(
-                self._initialization.map_api, ego_state, self._initialization.route_roadblock_ids
-            )
-            self._initialize_route_plan(self._scenario_manager.get_route_roadblock_ids())
-            self._path_planner = LatticePlanner(self._candidate_lane_edge_ids, self._max_path_length)
+            # self._scenario_manager = ScenarioManager(
+            #     self._initialization.map_api, ego_state, self._initialization.route_roadblock_ids
+            # )
+            # self._initialize_route_plan(self._scenario_manager.get_route_roadblock_ids())
+            # self._path_planner = LatticePlanner(self._candidate_lane_edge_ids, self._max_path_length)
             self._init_laneletnets(ego_state)
         trajectory, plan, predictions, track_dict, model_plan = self._plan(iteration, ego_state, history, traffic_light_data, observation)
 
@@ -936,30 +970,22 @@ class Planner(AbstractPlanner):
         
         if self._render:
             self._imgs.append(
-                    self._scene_render.render_from_simulation(
-                        current_input=current_input,
-                        initialization=self._initialization,
-                        route_roadblock_ids=self._route_roadblock_ids,
-                        iteration=current_input.iteration.index,
-                        planning_trajectory=plan[:, :2],
-                        predictions=predictions,
-                        agent_attn_weights=track_dict,
-                        candidate_trajectories=model_plan,
-                        return_img=self._render,
-                    )
+                self._scene_loader.plot_scenario(
+                    predictions=predictions,
+                    planning_trajectory=plan[:, :2],
+                    return_img=self._render,
+                    candidate_trajectories=model_plan
+                )
             )
             filename= f'{iteration}.png'
             img = self._imgs[-1]
             plt.imsave(os.path.join(self._save_dir, filename), img)
         else:
-            self._scene_render.render_from_simulation(
-                current_input=current_input,
-                initialization=self._initialization,
-                route_roadblock_ids=self._route_roadblock_ids,
-                iteration=current_input.iteration.index,
-                planning_trajectory=plan[:, :2],
+            self._scene_loader.plot_scenario(
                 predictions=predictions,
+                planning_trajectory=plan[:, :2],
                 return_img=self._render,
+                candidate_trajectories=model_plan
             )
 
         print(f'Iteration {iteration}: {time.time() - s:.3f} s')
@@ -977,5 +1003,5 @@ class Planner(AbstractPlanner):
         self.__dict__.update(state)
         # 重新初始化motion_planner
         if self.config_path:
-            self._motion_planner = motion_planning.motion_planner(self.config_path)
+            sfelf._motion_planner = motion_planning.motion_planner(self.config_path)
             self._smoother = MotionNonlinearSmoother(trajectory_len=T*10-1, dt=DT)

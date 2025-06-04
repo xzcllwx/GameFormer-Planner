@@ -17,8 +17,8 @@ from nuplan.planning.simulation.planner.ml_planner.transform_utils import transf
 from shapely.geometry import Point
 import pandas as pd
 
-MAX_ACC = 4.0
-MAX_DEC = 7.0
+MAX_ACC = 3.0
+MAX_DEC = 5.0
 COMFORT_ACC = 1.0
 
 class TrajectoryPlanner:
@@ -322,27 +322,28 @@ def calcualte_branch_time(l_b, l_pred, f_b, f_pred, ego_v, tangent_vector, histo
     # print(f"follower_p_leader_ob: {p_follower}")
     # Calculate the entropy of l_b
     follower_entropy = -np.cumsum(p_follower * np.log2(p_follower + 1e-9), axis=0) - np.cumsum(p_leader * np.log2(p_leader + 1e-9), axis=0)
-    # print(f"leader_entropy: {leader_entropy}")
-    # print(f"follower_entropy: {follower_entropy}")
+    print(f"leader_entropy: {np.diff(leader_entropy)}")
+    print(f"follower_entropy: {np.diff(follower_entropy)}")
     
     # 计算分支时间
     # Find the first index where leader_entropy exceeds a specified threshold
-    threshold_value = 1 + 4.5 # You can adjust this threshold as needed
+    threshold_value = 25 # You can adjust this threshold as needed
     alpha = 0.2
     leader_branch_time_index = np.argmax(leader_entropy > threshold_value)
-    # print(f"Branch time index where leader_entropy exceeds {threshold_value}: {leader_branch_time_index}")
+    print(f"Branch time index where leader_entropy exceeds {threshold_value}: {leader_branch_time_index}")
     if leader_branch_time_index == 0:
         leader_branch_time_index = T * FREQUENCE - 10
     follower_branch_time_index = np.argmax(follower_entropy > threshold_value)
-    # print(f"Branch time index where follower_entropy exceeds {threshold_value}: {follower_branch_time_index}")
+    print(f"Branch time index where follower_entropy exceeds {threshold_value}: {follower_branch_time_index}")
     if follower_branch_time_index == 0:
         follower_branch_time_index = T * FREQUENCE - 10
     branch_time = min(leader_branch_time_index, follower_branch_time_index)
     # branch_time = np.ceil((leader_branch_time_index+follower_branch_time_index)/2)
     print(f"Branch time: {branch_time}")
     if len(history_branch_time) > 0:
-        branch_time = int(history_branch_time[-1] + (branch_time - history_branch_time[-1]) * 0.2)
-    branch_time = np.clip(branch_time, 5, T * FREQUENCE - 10)
+        branch_time = int(history_branch_time[-1] + (branch_time - history_branch_time[-1]) * alpha)
+    else:
+        branch_time = int(70 + (branch_time - 70) * alpha)
     print(f"Branch time after clip: {branch_time}")
     
     return branch_time
